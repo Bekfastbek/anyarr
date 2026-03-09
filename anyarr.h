@@ -305,6 +305,7 @@ static inline bool any_init(DynamicArray *buf) {
     buf -> capacity = 4;
     buf -> data = calloc(buf -> capacity, sizeof(any));
     if (buf -> data == NULL) {
+        buf -> capacity = 0;
         return false;
     }
     return true;
@@ -316,16 +317,22 @@ static inline bool any_append(DynamicArray *buf, const any value) {
     if (buf == NULL) {
         return false;
     }
-    if (buf -> size == buf -> capacity) {
-        const size_t capacity = buf -> capacity + (buf -> capacity >> 1);
-        any *temp = realloc(buf -> data, capacity * sizeof(any));
+    if (buf->size == buf->capacity) {
+        size_t new_capacity;
+        if (buf->capacity == 0) {
+            new_capacity = 4;
+        }
+        else {
+            new_capacity = buf->capacity + (buf->capacity >> 1);
+        }
+        any *temp = realloc(buf->data, new_capacity * sizeof(any));
         if (temp == NULL) {
             return false;
         }
-        buf -> data = temp;
-        buf -> capacity = capacity;
+        buf->data = temp;
+        buf->capacity = new_capacity;
     }
-    buf -> data[buf -> size++] = value;
+    buf->data[buf->size++] = value;
     return true;
 }
 
