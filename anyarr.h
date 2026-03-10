@@ -13,7 +13,6 @@
 
 /*TO DO:
  * Making example code and writing docs
- * Maybe allowing an option to pass nullptr as a separate function from assign_any()? Could be useful for passing custom datatypes
  */
 
 
@@ -41,7 +40,8 @@ enum Type {
     TYPE_FLOAT,
     TYPE_DOUBLE,
     TYPE_STRING,
-    TYPE_STRING_SMALL
+    TYPE_STRING_SMALL,
+    TYPE_PTR
 };
 
 typedef struct {
@@ -56,6 +56,7 @@ typedef struct {
                 float f;
                 double d;
                 char *s;
+                void *p;
             } data;
         };
         struct {
@@ -70,6 +71,12 @@ typedef struct {
     size_t size;
     size_t capacity;
 } DynamicArray;
+
+
+
+static inline ANY_NAMESPACE any_make_null() {
+    return (ANY_NAMESPACE){TYPE_NULL};
+}
 
 
 
@@ -129,6 +136,15 @@ static inline ANY_NAMESPACE assign_string(const char *s) {
 
 
 
+static inline ANY_NAMESPACE assign_ptr(void *p) {
+    if (p == NULL) {
+        return any_make_null();
+    }
+    return (ANY_NAMESPACE){TYPE_PTR, .data.p = p};
+}
+
+
+
 static inline bool any_is_null(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_NULL;
 }
@@ -173,6 +189,12 @@ static inline bool any_is_double(const ANY_NAMESPACE *val) {
 
 static inline bool any_is_string(const ANY_NAMESPACE *val) {
     return val && (val->type == TYPE_STRING || val->type == TYPE_STRING_SMALL);
+}
+
+
+
+static inline bool any_is_ptr(const ANY_NAMESPACE *val) {
+    return val && val->type == TYPE_PTR;
 }
 
 
@@ -271,6 +293,19 @@ static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char 
 
 
 
+static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val->type != TYPE_PTR) {
+        return ANYARR_ERR_TYPE_MISMATCH;
+    }
+    *out_value = val->data.p;
+    return ANYARR_OK;
+}
+
+
+
 static inline bool any_as_bool_or(const ANY_NAMESPACE *val, bool fallback) {
     if (any_is_bool(val)) {
         return val->data.b;
@@ -340,8 +375,11 @@ static inline const char* any_as_string_or(const ANY_NAMESPACE *val, const char*
 
 
 
-static inline ANY_NAMESPACE any_make_null() {
-    return (ANY_NAMESPACE){TYPE_NULL};
+static inline void* any_as_ptr_or(const ANY_NAMESPACE *val, void* fallback) {
+    if (any_is_ptr(val)) {
+        return val->data.p;
+    }
+    return fallback;
 }
 
 
@@ -550,7 +588,8 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     float: assign_float,            \
     double: assign_double,          \
     char*: assign_string,           \
-    const char*: assign_string      \
+    const char*: assign_string,     \
+    default: assign_ptr             \
 )(x)
 
 #define get_any(val_ptr, out_ptr) _Generic((out_ptr),   \
@@ -560,7 +599,8 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     uint64_t*: any_get_uint,                            \
     float*: any_get_float,                              \
     double*: any_get_double,                            \
-    const char**: any_get_string                        \
+    const char**: any_get_string,                       \
+    void**: any_get_ptr                                 \
 )(val_ptr, out_ptr)
 
 #define get_at(buf_ptr, index, out_ptr) \
