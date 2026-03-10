@@ -11,12 +11,9 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-
-
 /*TO DO:
- * Proper error handling instead of just using bool
  * Making example code and writing docs
- * assign_int() needs to support short, long long, unsigned, etc
+ * Maybe allowing an option to pass nullptr as a separate function from assign_any()? Could be useful for passing custom datatypes
  */
 
 
@@ -27,8 +24,11 @@
 
 typedef enum {
     ANYARR_OK,
-    ANYARR_OOM,
-    ANYARR_OVERFLOW
+    ANYARR_ERR_OOM,
+    ANYARR_ERR_NULLPTR,
+    ANYARR_ERR_OUT_OF_BOUNDS,
+    ANYARR_ERR_EMPTY,
+    ANYARR_ERR_TYPE_MISMATCH
 } anyarr_result;
 
 enum Type {
@@ -37,6 +37,7 @@ enum Type {
     TYPE_BOOL,
     TYPE_CHAR,
     TYPE_INT,
+    TYPE_UINT,
     TYPE_FLOAT,
     TYPE_DOUBLE,
     TYPE_STRING,
@@ -50,7 +51,8 @@ typedef struct {
             union {
                 bool b;
                 char c;
-                int i;
+                int64_t i;
+                uint64_t u;
                 float f;
                 double d;
                 char *s;
@@ -83,8 +85,14 @@ static inline ANY_NAMESPACE assign_char(const char c) {
 
 
 
-static inline ANY_NAMESPACE assign_int(const int i) {
+static inline ANY_NAMESPACE assign_int(const int64_t i) {
     return (ANY_NAMESPACE){TYPE_INT, .data.i = i};
+}
+
+
+
+static inline ANY_NAMESPACE assign_uint(const uint64_t u) {
+    return (ANY_NAMESPACE){TYPE_UINT, .data.u = u};
 }
 
 
@@ -145,6 +153,12 @@ static inline bool any_is_int(const ANY_NAMESPACE *val) {
 
 
 
+static inline bool any_is_uint(const ANY_NAMESPACE *val) {
+    return val && val->type == TYPE_UINT;
+}
+
+
+
 static inline bool any_is_float(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_FLOAT;
 }
@@ -163,68 +177,96 @@ static inline bool any_is_string(const ANY_NAMESPACE *val) {
 
 
 
-static inline bool any_get_bool(const ANY_NAMESPACE *val, bool *out_value) {
-    if (val == NULL || out_value == NULL || val->type != TYPE_BOOL) {
-        return false;
+static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, bool *out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val->type != TYPE_BOOL) {
+        return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.b;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_get_char(const ANY_NAMESPACE *val, char *out_value) {
-    if (val == NULL || out_value == NULL || val -> type != TYPE_CHAR) {
-        return false;
+static inline anyarr_result any_get_char(const ANY_NAMESPACE *val, char *out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val -> type != TYPE_CHAR) {
+        return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val -> data.c;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_get_int(const ANY_NAMESPACE *val, int *out_value) {
-    if (val == NULL || out_value == NULL || val -> type != TYPE_INT) {
-        return false;
+static inline anyarr_result any_get_int(const ANY_NAMESPACE *val, int64_t *out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val -> type != TYPE_INT) {
+        return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val -> data.i;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_get_float(const ANY_NAMESPACE *val, float *out_value) {
-    if (val == NULL || out_value == NULL || val -> type != TYPE_FLOAT) {
-        return false;
+static inline anyarr_result any_get_uint(const ANY_NAMESPACE *val, uint64_t *out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val->type != TYPE_UINT) {
+        return ANYARR_ERR_TYPE_MISMATCH;
+    }
+    *out_value = val->data.u;
+    return ANYARR_OK;
+}
+
+
+
+static inline anyarr_result any_get_float(const ANY_NAMESPACE *val, float *out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val -> type != TYPE_FLOAT) {
+        return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val -> data.f;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_get_double(const ANY_NAMESPACE *val, double *out_value) {
-    if (val == NULL || out_value == NULL || val -> type != TYPE_DOUBLE) {
-        return false;
+static inline anyarr_result any_get_double(const ANY_NAMESPACE *val, double *out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val -> type != TYPE_DOUBLE) {
+        return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val -> data.d;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_get_string(const ANY_NAMESPACE *val, const char **out_value) {
+static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char **out_value) {
     if (val == NULL || out_value == NULL) {
-        return false;
+        return ANYARR_ERR_NULLPTR;
     }
     if (val -> type == TYPE_STRING) {
         *out_value = val -> data.s;
-        return true;
+        return ANYARR_OK;
     } else if (val -> type == TYPE_STRING_SMALL) {
         *out_value = val -> small_buf;
-        return true;
+        return ANYARR_OK;
     }
-    return false;
+    return ANYARR_ERR_TYPE_MISMATCH;
 }
 
 
@@ -247,9 +289,18 @@ static inline char any_as_char_or(const ANY_NAMESPACE *val, char fallback) {
 
 
 
-static inline int any_as_int_or(const ANY_NAMESPACE *val, int fallback) {
+static inline int64_t any_as_int_or(const ANY_NAMESPACE *val, int64_t fallback) {
     if (any_is_int(val)) {
         return val->data.i;
+    }
+    return fallback;
+}
+
+
+
+static inline uint64_t any_as_uint_or(const ANY_NAMESPACE *val, uint64_t fallback) {
+    if (any_is_uint(val)) {
+        return val->data.u;
     }
     return fallback;
 }
@@ -295,45 +346,49 @@ static inline ANY_NAMESPACE any_make_null() {
 
 
 
-static inline void any_destroy(ANY_NAMESPACE *val) {
-    if (val == NULL) return;
+static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
+    if (val == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
     if (val->type == TYPE_STRING) {
         free(val->data.s);
     }
     *val = any_make_null();
+    return ANYARR_OK;
 }
 
 
 
-static inline void any_reassign(ANY_NAMESPACE *target, const ANY_NAMESPACE new_val) {
+static inline anyarr_result any_reassign(ANY_NAMESPACE *target, const ANY_NAMESPACE new_val) {
     if (target == NULL) {
-        return;
+        return ANYARR_ERR_NULLPTR;
     }
     any_destroy(target);
     *target = new_val;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_init(DynamicArray *buf) {
+static inline anyarr_result any_init(DynamicArray *buf) {
     if (buf == NULL) {
-        return false;
+        return ANYARR_ERR_NULLPTR;
     }
     buf -> size = 0;
     buf -> capacity = 4;
     buf -> data = calloc(buf -> capacity, sizeof(ANY_NAMESPACE));
     if (buf -> data == NULL) {
         buf -> capacity = 0;
-        return false;
+        return ANYARR_ERR_OOM;
     }
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_append(DynamicArray *buf, const ANY_NAMESPACE value) {
+static inline anyarr_result any_append(DynamicArray *buf, const ANY_NAMESPACE value) {
     if (buf == NULL) {
-        return false;
+        return ANYARR_ERR_NULLPTR;
     }
     if (buf->size == buf->capacity) {
         size_t new_capacity;
@@ -345,20 +400,23 @@ static inline bool any_append(DynamicArray *buf, const ANY_NAMESPACE value) {
         }
         ANY_NAMESPACE *temp = realloc(buf->data, new_capacity * sizeof(ANY_NAMESPACE));
         if (temp == NULL) {
-            return false;
+            return ANYARR_ERR_OOM;
         }
         buf->data = temp;
         buf->capacity = new_capacity;
     }
     buf->data[buf->size++] = value;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_remove_index(DynamicArray *buf, size_t index) {
-    if (buf == NULL || index >= buf -> size) {
-        return false;
+static inline anyarr_result any_remove_index(DynamicArray *buf, size_t index) {
+    if (buf == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (index >= buf -> size) {
+        return ANYARR_ERR_OUT_OF_BOUNDS;
     }
     any_destroy(&buf -> data[index]);
     const size_t index_queue = buf -> size - index - 1;
@@ -366,82 +424,94 @@ static inline bool any_remove_index(DynamicArray *buf, size_t index) {
         memmove(&buf -> data[index], &buf -> data[index + 1], index_queue * sizeof(ANY_NAMESPACE));
     }
     buf -> size--;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_set_index(DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
-    if (buf == NULL || index >= buf -> size) {
-        return false;
+static inline anyarr_result any_set_index(DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
+    if (buf == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (index >= buf -> size) {
+        return ANYARR_ERR_OUT_OF_BOUNDS;
     }
     any_destroy(&buf -> data[index]);
     buf -> data[index] = value;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_reserve(DynamicArray *buf, size_t new_capacity) {
-    if (buf == NULL || new_capacity <= buf->capacity) {
-        return true;
+static inline anyarr_result any_reserve(DynamicArray *buf, size_t new_capacity) {
+    if (buf == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (new_capacity <= buf->capacity) {
+        return ANYARR_OK;
     }
     ANY_NAMESPACE *temp = realloc(buf->data, new_capacity * sizeof(ANY_NAMESPACE));
     if (temp == NULL) {
-        return false;
+        return ANYARR_ERR_OOM;
     }
     buf->data = temp;
     buf->capacity = new_capacity;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_shrink_to_fit(DynamicArray *buf) {
-    if (buf == NULL || buf->capacity == buf->size) {
-        return false;
+static inline anyarr_result any_shrink_to_fit(DynamicArray *buf) {
+    if (buf == NULL) {
+        return ANYARR_ERR_NULLPTR;
     }
     if (buf->size == 0) {
         free(buf->data);
         buf->data = NULL;
         buf->capacity = 0;
-        return true;
+        return ANYARR_OK;
     }
     ANY_NAMESPACE *temp = realloc(buf->data, buf->size * sizeof(ANY_NAMESPACE));
-    if (temp == NULL) return false;
+    if (temp == NULL) {
+        return ANYARR_ERR_OOM;
+    }
     buf->data = temp;
     buf->capacity = buf->size;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline bool any_pop(DynamicArray *buf) {
-    if (buf == NULL || buf->size == 0) {
-        return false;
+static inline anyarr_result any_pop(DynamicArray *buf) {
+    if (buf == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (buf->size == 0) {
+        return ANYARR_ERR_EMPTY;
     }
     any_destroy(&buf->data[buf->size - 1]);
     buf->size--;
-    return true;
+    return ANYARR_OK;
 }
 
 
 
-static inline void any_clear(DynamicArray *buf) {
-    if (buf == NULL || buf->data == NULL) {
-        return;
+static inline anyarr_result any_clear(DynamicArray *buf) {
+    if (buf == NULL) {
+        return ANYARR_ERR_NULLPTR;
     }
     for (size_t i = 0; i < buf->size; i++) {
         any_destroy(&buf->data[i]);
     }
     buf->size = 0;
+    return ANYARR_OK;
 }
 
 
 
-static inline void any_free(DynamicArray *buf) {
-    if (buf == NULL || buf -> data == NULL) {
-        return;
+static inline anyarr_result any_free(DynamicArray *buf) {
+    if (buf == NULL) {
+        return ANYARR_ERR_NULLPTR;
     }
     for (size_t i = 0; i < buf -> size; i++) {
         any_destroy(&buf -> data[i]);
@@ -450,6 +520,7 @@ static inline void any_free(DynamicArray *buf) {
     buf -> data = NULL;
     buf -> size = 0;
     buf -> capacity = 0;
+    return ANYARR_OK;
 }
 
 
@@ -466,7 +537,16 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
 #define assign_any(x) _Generic((x), \
     _Bool: assign_bool,             \
     char: assign_char,              \
+    signed char: assign_int,        \
+    short: assign_int,              \
     int: assign_int,                \
+    long: assign_int,               \
+    long long: assign_int,          \
+    unsigned char: assign_uint,     \
+    unsigned short: assign_uint,    \
+    unsigned int: assign_uint,      \
+    unsigned long: assign_uint,     \
+    unsigned long long: assign_uint,\
     float: assign_float,            \
     double: assign_double,          \
     char*: assign_string,           \
@@ -476,7 +556,8 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
 #define get_any(val_ptr, out_ptr) _Generic((out_ptr),   \
     bool*: any_get_bool,                                \
     char*: any_get_char,                                \
-    int*: any_get_int,                                  \
+    int64_t*: any_get_int,                              \
+    uint64_t*: any_get_uint,                            \
     float*: any_get_float,                              \
     double*: any_get_double,                            \
     const char**: any_get_string                        \
