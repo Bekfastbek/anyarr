@@ -13,6 +13,7 @@
 
 /*TO DO:
  * Making example code and writing docs
+ * Hashmaps implementation
  */
 
 
@@ -41,8 +42,12 @@ enum Type {
     TYPE_DOUBLE,
     TYPE_STRING,
     TYPE_STRING_SMALL,
-    TYPE_PTR
+    TYPE_PTR,
+    TYPE_ARRAY,
+    TYPE_MAP
 };
+
+typedef struct DynamicArray DynamicArray;
 
 typedef struct {
     union {
@@ -57,6 +62,7 @@ typedef struct {
                 double d;
                 char *s;
                 void *p;
+                DynamicArray *a;
             } data;
         };
         struct {
@@ -66,11 +72,11 @@ typedef struct {
     };
 } ANY_NAMESPACE;
 
-typedef struct {
+struct DynamicArray {
     ANY_NAMESPACE *data;
     size_t size;
     size_t capacity;
-} DynamicArray;
+};
 
 
 
@@ -141,6 +147,15 @@ static inline ANY_NAMESPACE assign_ptr(void *p) {
         return any_make_null();
     }
     return (ANY_NAMESPACE){TYPE_PTR, .data.p = p};
+}
+
+
+
+static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
+    if (a == NULL) {
+        return any_make_null();
+    }
+    return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = a};
 }
 
 
@@ -306,6 +321,19 @@ static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_val
 
 
 
+static inline anyarr_result any_get_arr(const ANY_NAMESPACE *val, DynamicArray **out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val -> type != TYPE_ARRAY) {
+        return ANYARR_ERR_TYPE_MISMATCH;
+    }
+    *out_value = val -> data.a;
+    return ANYARR_OK;
+}
+
+
+
 static inline bool any_as_bool_or(const ANY_NAMESPACE *val, bool fallback) {
     if (any_is_bool(val)) {
         return val->data.b;
@@ -384,12 +412,17 @@ static inline void* any_as_ptr_or(const ANY_NAMESPACE *val, void* fallback) {
 
 
 
+static inline anyarr_result any_free(DynamicArray *buf);
 static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
     if (val == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
     if (val->type == TYPE_STRING) {
         free(val->data.s);
+    }
+    if (val -> type == TYPE_ARRAY) {
+        any_free( val -> data.a);
+        free(val -> data.a);
     }
     *val = any_make_null();
     return ANYARR_OK;
@@ -589,6 +622,7 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     double: assign_double,          \
     char*: assign_string,           \
     const char*: assign_string,     \
+    DynamicArray*: assign_array,    \
     default: assign_ptr             \
 )(x)
 
