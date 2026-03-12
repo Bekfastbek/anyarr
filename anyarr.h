@@ -7,15 +7,19 @@
 #ifndef ANYARR_H
 #define ANYARR_H
 #include <stdint.h>
-#include <string.h>
 #include <stdlib.h>
-#include <stdbool.h>
+#include <string.h>
 
 /*TO DO:
  * Making example code and writing docs
- * Hashmaps implementation
+ * Flat Open Address Hashmaps implementation
+ * Arena allocator for O(1) alloc
+ * any_clone() and any_equal() for safe assignments and comparisons
+ * any_iteration()? for looping through the arrays
+ * Blob types for storing streams of data like b64 or tls
+ * get_map() and get_array() for nested traversal
+ * Synthetic benchmarks compared to other libraries in AWS
  */
-
 
 
 #ifndef ANY_NAMESPACE // just a QOL feature, they can rename "Any" to prevent namespace pollution
@@ -33,7 +37,6 @@ typedef enum {
 
 enum Type {
     TYPE_NULL,
-    TYPE_ERROR_OOM,
     TYPE_BOOL,
     TYPE_CHAR,
     TYPE_INT,
@@ -54,7 +57,7 @@ typedef struct {
         struct {
             uint8_t type;
             union {
-                bool b;
+                _Bool b;
                 char c;
                 int64_t i;
                 uint64_t u;
@@ -67,7 +70,8 @@ typedef struct {
         };
         struct {
             uint8_t _type_alias;
-            char small_buf[15]; // From my testing 15 seemed to be much faster than 16 bytes around ~30% on append speeds, going above introduces the next set of bytes which means more padding and more work for cpu
+            char small_buf[15];
+            // From my testing 15 seemed to be much faster than 16 bytes around ~30% on append speeds, going above introduces the next set of bytes in l1 cache which means more padding and more work for cpu
         };
     };
 } ANY_NAMESPACE;
@@ -79,17 +83,14 @@ struct DynamicArray {
 };
 
 
-
 static inline ANY_NAMESPACE any_make_null() {
     return (ANY_NAMESPACE){TYPE_NULL};
 }
 
 
-
-static inline ANY_NAMESPACE assign_bool(const bool b) {
+static inline ANY_NAMESPACE assign_bool(const _Bool b) {
     return (ANY_NAMESPACE){TYPE_BOOL, .data.b = b};
 }
-
 
 
 static inline ANY_NAMESPACE assign_char(const char c) {
@@ -97,11 +98,9 @@ static inline ANY_NAMESPACE assign_char(const char c) {
 }
 
 
-
 static inline ANY_NAMESPACE assign_int(const int64_t i) {
     return (ANY_NAMESPACE){TYPE_INT, .data.i = i};
 }
-
 
 
 static inline ANY_NAMESPACE assign_uint(const uint64_t u) {
@@ -109,17 +108,14 @@ static inline ANY_NAMESPACE assign_uint(const uint64_t u) {
 }
 
 
-
 static inline ANY_NAMESPACE assign_float(const float f) {
     return (ANY_NAMESPACE){TYPE_FLOAT, .data.f = f};
 }
 
 
-
 static inline ANY_NAMESPACE assign_double(const double d) {
     return (ANY_NAMESPACE){TYPE_DOUBLE, .data.d = d};
 }
-
 
 
 static inline ANY_NAMESPACE assign_string(const char *s) {
@@ -128,18 +124,17 @@ static inline ANY_NAMESPACE assign_string(const char *s) {
     }
     const size_t len = strlen(s);
     if (len < 15) {
-        ANY_NAMESPACE val = { ._type_alias = TYPE_STRING_SMALL };
+        ANY_NAMESPACE val = {._type_alias = TYPE_STRING_SMALL};
         strcpy(val.small_buf, s);
         return val;
     }
     char *dup = malloc(len + 1);
     if (dup == NULL) {
-        return (ANY_NAMESPACE){TYPE_ERROR_OOM};
+        return (ANY_NAMESPACE){ANYARR_ERR_OOM};
     }
     strcpy(dup, s);
-    return (ANY_NAMESPACE){ .type = TYPE_STRING, .data.s = dup };
+    return (ANY_NAMESPACE){.type = TYPE_STRING, .data.s = dup};
 }
-
 
 
 static inline ANY_NAMESPACE assign_ptr(void *p) {
@@ -150,7 +145,6 @@ static inline ANY_NAMESPACE assign_ptr(void *p) {
 }
 
 
-
 static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
     if (a == NULL) {
         return any_make_null();
@@ -159,62 +153,52 @@ static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
 }
 
 
-
-static inline bool any_is_null(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_null(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_NULL;
 }
 
 
-
-static inline bool any_is_bool(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_bool(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_BOOL;
 }
 
 
-
-static inline bool any_is_char(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_char(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_CHAR;
 }
 
 
-
-static inline bool any_is_int(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_int(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_INT;
 }
 
 
-
-static inline bool any_is_uint(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_uint(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_UINT;
 }
 
 
-
-static inline bool any_is_float(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_float(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_FLOAT;
 }
 
 
-
-static inline bool any_is_double(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_double(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_DOUBLE;
 }
 
 
-
-static inline bool any_is_string(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_string(const ANY_NAMESPACE *val) {
     return val && (val->type == TYPE_STRING || val->type == TYPE_STRING_SMALL);
 }
 
 
-
-static inline bool any_is_ptr(const ANY_NAMESPACE *val) {
+static inline _Bool any_is_ptr(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_PTR;
 }
 
 
-
-static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, bool *out_value) {
+static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, _Bool *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
@@ -226,31 +210,28 @@ static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, bool *out_val
 }
 
 
-
 static inline anyarr_result any_get_char(const ANY_NAMESPACE *val, char *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (val -> type != TYPE_CHAR) {
+    if (val->type != TYPE_CHAR) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
-    *out_value = val -> data.c;
+    *out_value = val->data.c;
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_get_int(const ANY_NAMESPACE *val, int64_t *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (val -> type != TYPE_INT) {
+    if (val->type != TYPE_INT) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
-    *out_value = val -> data.i;
+    *out_value = val->data.i;
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_get_uint(const ANY_NAMESPACE *val, uint64_t *out_value) {
@@ -265,47 +246,43 @@ static inline anyarr_result any_get_uint(const ANY_NAMESPACE *val, uint64_t *out
 }
 
 
-
 static inline anyarr_result any_get_float(const ANY_NAMESPACE *val, float *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (val -> type != TYPE_FLOAT) {
+    if (val->type != TYPE_FLOAT) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
-    *out_value = val -> data.f;
+    *out_value = val->data.f;
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_get_double(const ANY_NAMESPACE *val, double *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (val -> type != TYPE_DOUBLE) {
+    if (val->type != TYPE_DOUBLE) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
-    *out_value = val -> data.d;
+    *out_value = val->data.d;
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char **out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (val -> type == TYPE_STRING) {
-        *out_value = val -> data.s;
+    if (val->type == TYPE_STRING) {
+        *out_value = val->data.s;
         return ANYARR_OK;
-    } else if (val -> type == TYPE_STRING_SMALL) {
-        *out_value = val -> small_buf;
+    } else if (val->type == TYPE_STRING_SMALL) {
+        *out_value = val->small_buf;
         return ANYARR_OK;
     }
     return ANYARR_ERR_TYPE_MISMATCH;
 }
-
 
 
 static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_value) {
@@ -320,27 +297,24 @@ static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_val
 }
 
 
-
 static inline anyarr_result any_get_arr(const ANY_NAMESPACE *val, DynamicArray **out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (val -> type != TYPE_ARRAY) {
+    if (val->type != TYPE_ARRAY) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
-    *out_value = val -> data.a;
+    *out_value = val->data.a;
     return ANYARR_OK;
 }
 
 
-
-static inline bool any_as_bool_or(const ANY_NAMESPACE *val, bool fallback) {
+static inline _Bool any_as_bool_or(const ANY_NAMESPACE *val, _Bool fallback) {
     if (any_is_bool(val)) {
         return val->data.b;
     }
     return fallback;
 }
-
 
 
 static inline char any_as_char_or(const ANY_NAMESPACE *val, char fallback) {
@@ -351,14 +325,12 @@ static inline char any_as_char_or(const ANY_NAMESPACE *val, char fallback) {
 }
 
 
-
 static inline int64_t any_as_int_or(const ANY_NAMESPACE *val, int64_t fallback) {
     if (any_is_int(val)) {
         return val->data.i;
     }
     return fallback;
 }
-
 
 
 static inline uint64_t any_as_uint_or(const ANY_NAMESPACE *val, uint64_t fallback) {
@@ -369,14 +341,12 @@ static inline uint64_t any_as_uint_or(const ANY_NAMESPACE *val, uint64_t fallbac
 }
 
 
-
 static inline float any_as_float_or(const ANY_NAMESPACE *val, float fallback) {
     if (any_is_float(val)) {
         return val->data.f;
     }
     return fallback;
 }
-
 
 
 static inline double any_as_double_or(const ANY_NAMESPACE *val, double fallback) {
@@ -387,8 +357,7 @@ static inline double any_as_double_or(const ANY_NAMESPACE *val, double fallback)
 }
 
 
-
-static inline const char* any_as_string_or(const ANY_NAMESPACE *val, const char* fallback) {
+static inline const char *any_as_string_or(const ANY_NAMESPACE *val, const char *fallback) {
     if (!val) {
         return fallback;
     }
@@ -402,8 +371,7 @@ static inline const char* any_as_string_or(const ANY_NAMESPACE *val, const char*
 }
 
 
-
-static inline void* any_as_ptr_or(const ANY_NAMESPACE *val, void* fallback) {
+static inline void *any_as_ptr_or(const ANY_NAMESPACE *val, void *fallback) {
     if (any_is_ptr(val)) {
         return val->data.p;
     }
@@ -411,8 +379,8 @@ static inline void* any_as_ptr_or(const ANY_NAMESPACE *val, void* fallback) {
 }
 
 
-
 static inline anyarr_result any_free(DynamicArray *buf);
+
 static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
     if (val == NULL) {
         return ANYARR_ERR_NULLPTR;
@@ -420,14 +388,13 @@ static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
     if (val->type == TYPE_STRING) {
         free(val->data.s);
     }
-    if (val -> type == TYPE_ARRAY) {
-        any_free( val -> data.a);
-        free(val -> data.a);
+    if (val->type == TYPE_ARRAY) {
+        any_free(val->data.a);
+        free(val->data.a);
     }
     *val = any_make_null();
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_reassign(ANY_NAMESPACE *target, const ANY_NAMESPACE new_val) {
@@ -440,21 +407,19 @@ static inline anyarr_result any_reassign(ANY_NAMESPACE *target, const ANY_NAMESP
 }
 
 
-
 static inline anyarr_result any_init(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    buf -> size = 0;
-    buf -> capacity = 4;
-    buf -> data = calloc(buf -> capacity, sizeof(ANY_NAMESPACE));
-    if (buf -> data == NULL) {
-        buf -> capacity = 0;
+    buf->size = 0;
+    buf->capacity = 4;
+    buf->data = calloc(buf->capacity, sizeof(ANY_NAMESPACE));
+    if (buf->data == NULL) {
+        buf->capacity = 0;
         return ANYARR_ERR_OOM;
     }
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_append(DynamicArray *buf, const ANY_NAMESPACE value) {
@@ -465,8 +430,7 @@ static inline anyarr_result any_append(DynamicArray *buf, const ANY_NAMESPACE va
         size_t new_capacity;
         if (buf->capacity == 0) {
             new_capacity = 4;
-        }
-        else {
+        } else {
             new_capacity = buf->capacity + (buf->capacity >> 1);
         }
         ANY_NAMESPACE *temp = realloc(buf->data, new_capacity * sizeof(ANY_NAMESPACE));
@@ -481,37 +445,34 @@ static inline anyarr_result any_append(DynamicArray *buf, const ANY_NAMESPACE va
 }
 
 
-
 static inline anyarr_result any_remove_index(DynamicArray *buf, size_t index) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (index >= buf -> size) {
+    if (index >= buf->size) {
         return ANYARR_ERR_OUT_OF_BOUNDS;
     }
-    any_destroy(&buf -> data[index]);
-    const size_t index_queue = buf -> size - index - 1;
+    any_destroy(&buf->data[index]);
+    const size_t index_queue = buf->size - index - 1;
     if (index_queue > 0) {
-        memmove(&buf -> data[index], &buf -> data[index + 1], index_queue * sizeof(ANY_NAMESPACE));
+        memmove(&buf->data[index], &buf->data[index + 1], index_queue * sizeof(ANY_NAMESPACE));
     }
-    buf -> size--;
+    buf->size--;
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_set_index(DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (index >= buf -> size) {
+    if (index >= buf->size) {
         return ANYARR_ERR_OUT_OF_BOUNDS;
     }
-    any_destroy(&buf -> data[index]);
-    buf -> data[index] = value;
+    any_destroy(&buf->data[index]);
+    buf->data[index] = value;
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_reserve(DynamicArray *buf, size_t new_capacity) {
@@ -529,7 +490,6 @@ static inline anyarr_result any_reserve(DynamicArray *buf, size_t new_capacity) 
     buf->capacity = new_capacity;
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_shrink_to_fit(DynamicArray *buf) {
@@ -552,7 +512,6 @@ static inline anyarr_result any_shrink_to_fit(DynamicArray *buf) {
 }
 
 
-
 static inline anyarr_result any_pop(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
@@ -564,7 +523,6 @@ static inline anyarr_result any_pop(DynamicArray *buf) {
     buf->size--;
     return ANYARR_OK;
 }
-
 
 
 static inline anyarr_result any_clear(DynamicArray *buf) {
@@ -579,21 +537,19 @@ static inline anyarr_result any_clear(DynamicArray *buf) {
 }
 
 
-
 static inline anyarr_result any_free(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    for (size_t i = 0; i < buf -> size; i++) {
-        any_destroy(&buf -> data[i]);
+    for (size_t i = 0; i < buf->size; i++) {
+        any_destroy(&buf->data[i]);
     }
-    free(buf -> data);
-    buf -> data = NULL;
-    buf -> size = 0;
-    buf -> capacity = 0;
+    free(buf->data);
+    buf->data = NULL;
+    buf->size = 0;
+    buf->capacity = 0;
     return ANYARR_OK;
 }
-
 
 
 static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
@@ -602,7 +558,6 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     }
     return &buf->data[idx];
 }
-
 
 
 #define assign_any(x) _Generic((x), \
@@ -627,7 +582,7 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
 )(x)
 
 #define get_any(val_ptr, out_ptr) _Generic((out_ptr),   \
-    bool*: any_get_bool,                                \
+    _Bool*: any_get_bool,                                \
     char*: any_get_char,                                \
     int64_t*: any_get_int,                              \
     uint64_t*: any_get_uint,                            \
@@ -641,7 +596,6 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
 get_any(any_at((buf_ptr), (index)), (out_ptr))
 
 #define update_any(target_ptr, val) any_reassign((target_ptr), assign_any(val))
-
 
 
 #endif
