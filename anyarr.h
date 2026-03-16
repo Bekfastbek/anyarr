@@ -2,6 +2,7 @@
  * This library should work with C11 onwards flawlessly but C99 needs a lot of setup to work and generally not recommended
  * To make it work on C99, you might need to use the GNU C99 standard instead of strict C99 for anonymous structs to work
  * There is also no support for generic macros so remove the macros at the bottom of the file and stick with specific datatypes
+ * Another note, cleanup attribute is only a part of GCC/Clang not a part of C standard so if you are not using those compilers you will have to manually free memory
 */
 
 #ifndef ANYARR_H
@@ -12,12 +13,12 @@
 
 /*TO DO:
  * Making example code and writing docs
- * Flat Open Address Hashmaps implementation
  * Arena allocator for O(1) alloc
  * any_clone() and any_equal() for safe assignments and comparisons
  * any_iteration()? for looping through the arrays
  * Blob types for storing streams of data like b64 or tls
  * get_map() and get_array() for nested traversal
+ * Checks for gcc/clang and enforce RAII semantics through compiler
  * Synthetic benchmarks compared to other libraries in AWS
  */
 
@@ -51,11 +52,13 @@ enum Type {
 };
 
 typedef struct DynamicArray DynamicArray;
+typedef struct HashMap HashMap;
 
 typedef struct {
     union {
         struct {
             uint8_t type;
+
             union {
                 _Bool b;
                 char c;
@@ -66,8 +69,10 @@ typedef struct {
                 char *s;
                 void *p;
                 DynamicArray *a;
+                HashMap *m;
             } data;
         };
+
         struct {
             uint8_t _type_alias;
             char small_buf[15];
@@ -78,6 +83,24 @@ typedef struct {
 
 struct DynamicArray {
     ANY_NAMESPACE *data;
+    size_t size;
+    size_t capacity;
+};
+
+typedef enum {
+    MAP_SLOT_EMPTY,
+    MAP_SLOT_OCCUPIED,
+    MAP_SLOT_DELETED
+} MapSlotState;
+
+typedef struct {
+    char *key;
+    ANY_NAMESPACE value;
+    MapSlotState state;
+} MapEntry;
+
+struct HashMap {
+    MapEntry *entries;
     size_t size;
     size_t capacity;
 };
@@ -130,7 +153,7 @@ static inline ANY_NAMESPACE assign_string(const char *s) {
     }
     char *dup = malloc(len + 1);
     if (dup == NULL) {
-        return (ANY_NAMESPACE){ANYARR_ERR_OOM};
+        return any_make_null();
     }
     strcpy(dup, s);
     return (ANY_NAMESPACE){.type = TYPE_STRING, .data.s = dup};
@@ -150,6 +173,14 @@ static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
         return any_make_null();
     }
     return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = a};
+}
+
+
+static inline ANY_NAMESPACE assign_map(HashMap *m) {
+    if (m == NULL) {
+        return any_make_null();
+    }
+    return (ANY_NAMESPACE){TYPE_MAP, .data.m = m};
 }
 
 
@@ -192,6 +223,13 @@ static inline _Bool any_is_string(const ANY_NAMESPACE *val) {
     return val && (val->type == TYPE_STRING || val->type == TYPE_STRING_SMALL);
 }
 
+static inline _Bool any_is_array(const ANY_NAMESPACE *val) {
+    return val && val->type == TYPE_ARRAY;
+}
+
+static inline _Bool any_is_map(const ANY_NAMESPACE *val) {
+    return val && val->type == TYPE_MAP;
+}
 
 static inline _Bool any_is_ptr(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_PTR;
@@ -308,6 +346,16 @@ static inline anyarr_result any_get_arr(const ANY_NAMESPACE *val, DynamicArray *
     return ANYARR_OK;
 }
 
+static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap **out_value) {
+    if (val == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (val->type != TYPE_MAP) {
+        return ANYARR_ERR_TYPE_MISMATCH;
+    }
+    *out_value = val->data.m;
+    return ANYARR_OK;
+}
 
 static inline _Bool any_as_bool_or(const ANY_NAMESPACE *val, _Bool fallback) {
     if (any_is_bool(val)) {
@@ -371,6 +419,22 @@ static inline const char *any_as_string_or(const ANY_NAMESPACE *val, const char 
 }
 
 
+static inline DynamicArray *any_as_array_or(const ANY_NAMESPACE *val, DynamicArray *fallback) {
+    if (any_is_array(val)) {
+        return val->data.a;
+    }
+    return fallback;
+}
+
+
+static inline HashMap *any_as_map_or(const ANY_NAMESPACE *val, HashMap *fallback) {
+    if (any_is_map(val)) {
+        return val->data.m;
+    }
+    return fallback;
+}
+
+
 static inline void *any_as_ptr_or(const ANY_NAMESPACE *val, void *fallback) {
     if (any_is_ptr(val)) {
         return val->data.p;
@@ -380,6 +444,7 @@ static inline void *any_as_ptr_or(const ANY_NAMESPACE *val, void *fallback) {
 
 
 static inline anyarr_result any_free(DynamicArray *buf);
+static inline anyarr_result map_free(HashMap *m);
 
 static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
     if (val == NULL) {
@@ -391,6 +456,10 @@ static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
     if (val->type == TYPE_ARRAY) {
         any_free(val->data.a);
         free(val->data.a);
+    }
+    if (val->type == TYPE_MAP) {
+        map_free(val->data.m);
+        free(val->data.m);
     }
     *val = any_make_null();
     return ANYARR_OK;
@@ -407,6 +476,16 @@ static inline anyarr_result any_reassign(ANY_NAMESPACE *target, const ANY_NAMESP
 }
 
 
+static inline uint64_t map_hash(const char *key) {
+    uint64_t hash = 14695981039346656037ULL;
+    while (*key) {
+        hash ^= (uint64_t) (unsigned char) (*key++);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+
 static inline anyarr_result any_init(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
@@ -419,6 +498,145 @@ static inline anyarr_result any_init(DynamicArray *buf) {
         return ANYARR_ERR_OOM;
     }
     return ANYARR_OK;
+}
+
+
+static inline anyarr_result map_init(HashMap *m) {
+    if (m == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    m->size = 0;
+    m->capacity = 16;
+    m->entries = calloc(m->capacity, sizeof(MapEntry));
+    if (m->entries == NULL) {
+        m->capacity = 0;
+        return ANYARR_ERR_OOM;
+    }
+    return ANYARR_OK;
+}
+
+
+static inline anyarr_result map_resize(HashMap *m);
+
+static inline anyarr_result map_put(HashMap *m, char *key, const ANY_NAMESPACE value) {
+    if (m == NULL || m->entries == NULL || key == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (m->size >= (m->capacity * 3) / 4) {
+        anyarr_result result = map_resize(m);
+        if (result != ANYARR_OK) {
+            return result;
+        }
+    }
+    uint64_t hash = map_hash(key);
+    size_t index = hash % m->capacity;
+    size_t dead_index = SIZE_MAX;
+    while (1) {
+        MapEntry *slot = &m->entries[index];
+        if (slot->state == MAP_SLOT_EMPTY) {
+            size_t insert_index;
+            if (dead_index != SIZE_MAX) {
+                insert_index = dead_index;
+            } else {
+                insert_index = index;
+            }
+            MapEntry *target = &m->entries[insert_index];
+            target->key = strdup(key);
+            if (target->key == NULL) {
+                return ANYARR_ERR_OOM;
+            }
+            target->value = value;
+            target->state = MAP_SLOT_OCCUPIED;
+            m->size++;
+            return ANYARR_OK;
+        }
+        if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
+            any_destroy(&slot->value);
+            slot->value = value;
+            return ANYARR_OK;
+        }
+        if (slot->state == MAP_SLOT_DELETED && dead_index == SIZE_MAX) {
+            dead_index = index;
+        }
+        index = (index + 1) % m->capacity;
+    }
+}
+
+
+static inline anyarr_result map_resize(HashMap *m) {
+    if (m->entries == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    MapEntry *old_entries = m->entries;
+    size_t old_capacity = m->capacity;
+    m->capacity = old_capacity << 1;
+    m->entries = calloc(m->capacity, sizeof(MapEntry));
+    if (m->entries == NULL) {
+        m->entries = old_entries;
+        m->capacity = old_capacity;
+        return ANYARR_ERR_OOM;
+    }
+    m->size = 0;
+    for (size_t i = 0; i < old_capacity; i++) {
+        if (old_entries[i].state == MAP_SLOT_OCCUPIED) {
+            char *old_key = old_entries[i].key;
+            ANY_NAMESPACE old_val = old_entries[i].value;
+            map_put(m, old_key, old_val);
+            free(old_entries[i].key);
+        }
+    }
+    free(old_entries);
+    return ANYARR_OK;
+}
+
+
+static inline anyarr_result map_get(HashMap *m, char *key, ANY_NAMESPACE **out_value) {
+    if (m == NULL || m->entries == NULL || key == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    uint64_t hash = map_hash(key);
+    size_t index = hash % m->capacity;
+    while (1) {
+        MapEntry *slot = &m->entries[index];
+        if (slot->state == MAP_SLOT_EMPTY) {
+            return ANYARR_ERR_EMPTY;
+        }
+        if (slot->state == MAP_SLOT_DELETED) {
+            index = (index + 1) % m->capacity;
+            continue;
+        }
+        if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
+            *out_value = &slot->value;
+            return ANYARR_OK;
+        }
+        index = (index + 1) % m->capacity;
+    }
+    return ANYARR_ERR_OUT_OF_BOUNDS;
+}
+
+
+static inline anyarr_result map_remove(HashMap *m, char *key) {
+    if (m == NULL || m->entries == NULL || key == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    uint64_t hash = map_hash(key);
+    size_t index = hash % m->capacity;
+    size_t start = index;
+    do {
+        MapEntry *slot = &m->entries[index];
+        if (slot->state == MAP_SLOT_EMPTY) {
+            break;
+        }
+        if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
+            any_destroy(&slot->value);
+            free(slot->key);
+            slot->state = MAP_SLOT_DELETED;
+            m->size--;
+            return ANYARR_OK;
+        }
+        index = (index + 1) % m->capacity;
+    } while (index != start);
+    return ANYARR_ERR_OUT_OF_BOUNDS;
 }
 
 
@@ -552,6 +770,24 @@ static inline anyarr_result any_free(DynamicArray *buf) {
 }
 
 
+static inline anyarr_result map_free(HashMap *m) {
+    if (m == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    for (size_t i = 0; i < m->capacity; i++) {
+        if (m->entries[i].state == MAP_SLOT_OCCUPIED) {
+            free(m->entries[i].key);
+            any_destroy(&m->entries[i].value);
+        }
+    }
+    free(m->entries);
+    m->entries = NULL;
+    m->size = 0;
+    m->capacity = 0;
+    return ANYARR_OK;
+}
+
+
 static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     if (buf == NULL || idx >= buf->size) {
         return NULL;
@@ -578,17 +814,20 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     char*: assign_string,           \
     const char*: assign_string,     \
     DynamicArray*: assign_array,    \
+    HashMap*: assign_map,           \
     default: assign_ptr             \
 )(x)
 
 #define get_any(val_ptr, out_ptr) _Generic((out_ptr),   \
-    _Bool*: any_get_bool,                                \
+    _Bool*: any_get_bool,                               \
     char*: any_get_char,                                \
     int64_t*: any_get_int,                              \
     uint64_t*: any_get_uint,                            \
     float*: any_get_float,                              \
     double*: any_get_double,                            \
     const char**: any_get_string,                       \
+    DynamicArray**: any_get_arr,                        \
+    HashMap**: any_get_map,                             \
     void**: any_get_ptr                                 \
 )(val_ptr, out_ptr)
 
