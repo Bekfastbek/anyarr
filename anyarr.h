@@ -3,6 +3,7 @@
  * To make it work on C99, you might need to use the GNU C99 standard instead of strict C99 for anonymous structs to work
  * There is also no support for generic macros so remove the macros at the bottom of the file and stick with specific datatypes
  * Another note, cleanup attribute is only a part of GCC/Clang not a part of C standard so if you are not using those compilers you will have to manually free memory
+ * Also this library is made to be as fast as possible while being easy to use so it's not exactly efficient on memory usage
 */
 
 #ifndef ANYARR_H
@@ -13,7 +14,7 @@
 
 /*TO DO:
  * Making example code and writing docs
- * Arena allocator for O(1) alloc
+ * Virtual Arena allocator so need an os check for mmap (unix) and VirtualAlloc (Windows)
  * any_clone() and any_equal() for safe assignments and comparisons
  * any_iteration()? for looping through the arrays
  * Blob types for storing streams of data like b64 or tls
