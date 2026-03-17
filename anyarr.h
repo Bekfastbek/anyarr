@@ -111,6 +111,7 @@ typedef struct {
 
 struct HashMap {
     MapEntry *entries;
+    size_t deleted_count;
     size_t size;
     size_t capacity;
 };
@@ -579,6 +580,7 @@ static inline anyarr_result map_init(HashMap *m) {
         return ANYARR_ERR_NULLPTR;
     }
     m->size = 0;
+    m->deleted_count = 0;
     m->capacity = 16;
     m->entries = calloc(m->capacity, sizeof(MapEntry));
     if (m->entries == NULL) {
@@ -595,7 +597,7 @@ static inline anyarr_result map_put(HashMap *m, char *key, const ANY_NAMESPACE v
     if (m == NULL || m->entries == NULL || key == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (m->size >= (m->capacity * 3) / 4) {
+    if ((m->size + m->deleted_count) >= (m->capacity * 3) / 4) {
         anyarr_result result = map_resize(m);
         if (result != ANYARR_OK) {
             return result;
@@ -610,6 +612,7 @@ static inline anyarr_result map_put(HashMap *m, char *key, const ANY_NAMESPACE v
             size_t insert_index;
             if (dead_index != SIZE_MAX) {
                 insert_index = dead_index;
+                m->deleted_count--;
             } else {
                 insert_index = index;
             }
@@ -651,6 +654,7 @@ static inline anyarr_result map_resize(HashMap *m) {
         m->capacity = old_capacity;
         return ANYARR_ERR_OOM;
     }
+    m->deleted_count = 0;
     for (size_t i = 0; i < old_capacity; i++) {
         if (old_entries[i].state == MAP_SLOT_OCCUPIED) {
             uint64_t hash = map_hash(old_entries[i].key);
@@ -710,6 +714,7 @@ static inline anyarr_result map_remove(HashMap *m, char *key) {
             free(slot->key);
             slot->state = MAP_SLOT_DELETED;
             m->size--;
+            m->deleted_count++;
             return ANYARR_OK;
         }
         index = (index + 1) % m->capacity;
