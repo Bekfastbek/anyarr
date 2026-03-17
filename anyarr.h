@@ -17,7 +17,6 @@
  * Virtual Arena allocator so need an os check for mmap (unix) and VirtualAlloc (Windows)
  * any_clone() and any_equal() for safe assignments and comparisons
  * any_iteration()? for looping through the arrays
- * Blob types for storing streams of data like b64 or tls
  * get_map() and get_array() for nested traversal
  * Checks for gcc/clang and enforce RAII semantics through compiler
  * Synthetic benchmarks compared to other libraries in AWS
@@ -47,6 +46,8 @@ enum Type {
     TYPE_DOUBLE,
     TYPE_STRING,
     TYPE_STRING_SMALL,
+    TYPE_BLOB,
+    TYPE_BLOB_SMALL,
     TYPE_PTR,
     TYPE_ARRAY,
     TYPE_MAP
@@ -54,6 +55,7 @@ enum Type {
 
 typedef struct DynamicArray DynamicArray;
 typedef struct HashMap HashMap;
+typedef struct Blob Blob;
 
 typedef struct {
     union {
@@ -68,6 +70,7 @@ typedef struct {
                 float f;
                 double d;
                 char *s;
+                Blob *l;
                 void *p;
                 DynamicArray *a;
                 HashMap *m;
@@ -75,9 +78,15 @@ typedef struct {
         };
 
         struct {
-            uint8_t _type_alias;
+            uint8_t _type_sso;
             char small_buf[15];
-            // From my testing 15 seemed to be much faster than 16 bytes around ~30% on append speeds, going above introduces the next set of bytes in l1 cache which means more padding and more work for cpu
+            // From my testing 15 elements seemed to be much faster than 16 bytes around ~30% on append speeds, going above introduces the next set of bytes in l1 cache which means more padding and more work for cpu
+        };
+        struct {
+            uint8_t _type_sbo;
+            uint8_t len;
+            uint8_t small_blob[14];
+            // For small blobs like a short b64 stream, 14 elements on this because 1 byte is taken by len
         };
     };
 } ANY_NAMESPACE;
@@ -104,6 +113,11 @@ struct HashMap {
     MapEntry *entries;
     size_t size;
     size_t capacity;
+};
+
+struct Blob {
+    uint8_t *ptr;
+    size_t size;
 };
 
 
@@ -148,16 +162,40 @@ static inline ANY_NAMESPACE assign_string(const char *s) {
     }
     const size_t len = strlen(s);
     if (len < 15) {
-        ANY_NAMESPACE val = {._type_alias = TYPE_STRING_SMALL};
-        strcpy(val.small_buf, s);
+        ANY_NAMESPACE val = {._type_sso = TYPE_STRING_SMALL};
+        memcpy(val.small_buf, s, len + 1);
         return val;
     }
     char *dup = malloc(len + 1);
     if (dup == NULL) {
         return any_make_null();
     }
-    strcpy(dup, s);
+    memcpy(dup, s, len+1);
     return (ANY_NAMESPACE){.type = TYPE_STRING, .data.s = dup};
+}
+
+
+static inline ANY_NAMESPACE assign_blob(Blob *l) {
+    if (l == NULL || l->ptr == NULL) {
+        return (ANY_NAMESPACE){TYPE_NULL};
+    }
+    if (l->size < 15) {
+        ANY_NAMESPACE val = {._type_sbo = TYPE_BLOB_SMALL, .len = l->size};
+        memcpy(val.small_blob, l->ptr, l->size);
+        return val;
+    }
+    Blob *dup = malloc(sizeof(Blob));
+    if (dup == NULL) {
+        return any_make_null();
+    }
+    dup->ptr = malloc(l->size);
+    if (dup->ptr == NULL) {
+        free(dup);
+        return any_make_null();
+    }
+    memcpy(dup->ptr, l->ptr, l->size);
+    dup->size = l->size;
+    return (ANY_NAMESPACE){.type = TYPE_BLOB, .data.l = dup};
 }
 
 
@@ -169,17 +207,29 @@ static inline ANY_NAMESPACE assign_ptr(void *p) {
 }
 
 
+static inline anyarr_result any_init(DynamicArray *buf);
 static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
     if (a == NULL) {
-        return any_make_null();
+        DynamicArray *heap_arr = malloc(sizeof(DynamicArray));
+        if (heap_arr == NULL || any_init(heap_arr) != ANYARR_OK) {
+            free(heap_arr);
+            return any_make_null();
+        }
+        return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = heap_arr};
     }
     return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = a};
 }
 
 
+static inline anyarr_result map_init(HashMap *m);
 static inline ANY_NAMESPACE assign_map(HashMap *m) {
     if (m == NULL) {
-        return any_make_null();
+        HashMap *heap_map = malloc(sizeof(HashMap));
+        if (heap_map == NULL || map_init(heap_map) != ANYARR_OK) {
+            free(heap_map);
+            return any_make_null();
+        }
+        return (ANY_NAMESPACE){TYPE_MAP, .data.m = heap_map};
     }
     return (ANY_NAMESPACE){TYPE_MAP, .data.m = m};
 }
@@ -189,39 +239,36 @@ static inline _Bool any_is_null(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_NULL;
 }
 
-
 static inline _Bool any_is_bool(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_BOOL;
 }
-
 
 static inline _Bool any_is_char(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_CHAR;
 }
 
-
 static inline _Bool any_is_int(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_INT;
 }
-
 
 static inline _Bool any_is_uint(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_UINT;
 }
 
-
 static inline _Bool any_is_float(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_FLOAT;
 }
-
 
 static inline _Bool any_is_double(const ANY_NAMESPACE *val) {
     return val && val->type == TYPE_DOUBLE;
 }
 
-
 static inline _Bool any_is_string(const ANY_NAMESPACE *val) {
     return val && (val->type == TYPE_STRING || val->type == TYPE_STRING_SMALL);
+}
+
+static inline _Bool any_is_blob(const ANY_NAMESPACE *val) {
+    return val && (val->type == TYPE_BLOB || val->type == TYPE_BLOB_SMALL);
 }
 
 static inline _Bool any_is_array(const ANY_NAMESPACE *val) {
@@ -240,8 +287,7 @@ static inline _Bool any_is_ptr(const ANY_NAMESPACE *val) {
 static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, _Bool *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_BOOL) {
+    } else if (val->type != TYPE_BOOL) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.b;
@@ -252,8 +298,7 @@ static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, _Bool *out_va
 static inline anyarr_result any_get_char(const ANY_NAMESPACE *val, char *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_CHAR) {
+    } else if (val->type != TYPE_CHAR) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.c;
@@ -264,8 +309,7 @@ static inline anyarr_result any_get_char(const ANY_NAMESPACE *val, char *out_val
 static inline anyarr_result any_get_int(const ANY_NAMESPACE *val, int64_t *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_INT) {
+    } else if (val->type != TYPE_INT) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.i;
@@ -276,8 +320,7 @@ static inline anyarr_result any_get_int(const ANY_NAMESPACE *val, int64_t *out_v
 static inline anyarr_result any_get_uint(const ANY_NAMESPACE *val, uint64_t *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_UINT) {
+    } else if (val->type != TYPE_UINT) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.u;
@@ -288,8 +331,7 @@ static inline anyarr_result any_get_uint(const ANY_NAMESPACE *val, uint64_t *out
 static inline anyarr_result any_get_float(const ANY_NAMESPACE *val, float *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_FLOAT) {
+    } else if (val->type != TYPE_FLOAT) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.f;
@@ -300,8 +342,7 @@ static inline anyarr_result any_get_float(const ANY_NAMESPACE *val, float *out_v
 static inline anyarr_result any_get_double(const ANY_NAMESPACE *val, double *out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_DOUBLE) {
+    } else if (val->type != TYPE_DOUBLE) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.d;
@@ -312,8 +353,7 @@ static inline anyarr_result any_get_double(const ANY_NAMESPACE *val, double *out
 static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char **out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type == TYPE_STRING) {
+    } else if (val->type == TYPE_STRING) {
         *out_value = val->data.s;
         return ANYARR_OK;
     } else if (val->type == TYPE_STRING_SMALL) {
@@ -324,11 +364,26 @@ static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char 
 }
 
 
+static inline anyarr_result any_get_blob(const ANY_NAMESPACE *val, Blob *out_value) {
+    if (val == NULL || out_value == NULL) {
+    return ANYARR_ERR_NULLPTR;
+    } else if (val->type == TYPE_BLOB) {
+        out_value->ptr = val->data.l->ptr;
+        out_value->size = val->data.l->size;
+        return ANYARR_OK;
+    } else if (val->_type_sbo == TYPE_BLOB_SMALL) {
+        out_value->ptr = (uint8_t *)val->small_blob;
+        out_value->size = val->len;
+        return ANYARR_OK;
+    }
+    return ANYARR_ERR_TYPE_MISMATCH;
+}
+
+
 static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_PTR) {
+    } else if (val->type != TYPE_PTR) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.p;
@@ -339,24 +394,24 @@ static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_val
 static inline anyarr_result any_get_arr(const ANY_NAMESPACE *val, DynamicArray **out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_ARRAY) {
+    } else if (val->type != TYPE_ARRAY) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.a;
     return ANYARR_OK;
 }
 
+
 static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap **out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type != TYPE_MAP) {
+    } else if (val->type != TYPE_MAP) {
         return ANYARR_ERR_TYPE_MISMATCH;
     }
     *out_value = val->data.m;
     return ANYARR_OK;
 }
+
 
 static inline _Bool any_as_bool_or(const ANY_NAMESPACE *val, _Bool fallback) {
     if (any_is_bool(val)) {
@@ -407,14 +462,27 @@ static inline double any_as_double_or(const ANY_NAMESPACE *val, double fallback)
 
 
 static inline const char *any_as_string_or(const ANY_NAMESPACE *val, const char *fallback) {
-    if (!val) {
+    if (val == NULL) {
         return fallback;
-    }
-    if (val->type == TYPE_STRING) {
+    } else if (val->type == TYPE_STRING) {
         return val->data.s;
-    }
-    if (val->type == TYPE_STRING_SMALL) {
+    } else if (val->_type_sso == TYPE_STRING_SMALL) {
         return val->small_buf;
+    }
+    return fallback;
+}
+
+
+static inline Blob any_as_blob_or(const ANY_NAMESPACE *val, Blob fallback) {
+    if (val == NULL) {
+        return fallback;
+    } else if (val->type == TYPE_BLOB) {
+        return *val->data.l;
+    } else if (val->_type_sbo == TYPE_BLOB_SMALL) {
+        Blob temp;
+        temp.ptr = (uint8_t *)val->small_blob;
+        temp.size = val->len;
+        return temp;
     }
     return fallback;
 }
@@ -453,6 +521,10 @@ static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
     }
     if (val->type == TYPE_STRING) {
         free(val->data.s);
+    }
+    if (val->type == TYPE_BLOB) {
+        free(val->data.l->ptr);
+        free(val->data.l);
     }
     if (val->type == TYPE_ARRAY) {
         any_free(val->data.a);
@@ -542,10 +614,12 @@ static inline anyarr_result map_put(HashMap *m, char *key, const ANY_NAMESPACE v
                 insert_index = index;
             }
             MapEntry *target = &m->entries[insert_index];
-            target->key = strdup(key);
+            size_t key_len = strlen(key);
+            target->key = malloc(key_len + 1);
             if (target->key == NULL) {
                 return ANYARR_ERR_OOM;
             }
+            memcpy(target->key, key, key_len + 1);
             target->value = value;
             target->state = MAP_SLOT_OCCUPIED;
             m->size++;
@@ -577,13 +651,16 @@ static inline anyarr_result map_resize(HashMap *m) {
         m->capacity = old_capacity;
         return ANYARR_ERR_OOM;
     }
-    m->size = 0;
     for (size_t i = 0; i < old_capacity; i++) {
         if (old_entries[i].state == MAP_SLOT_OCCUPIED) {
-            char *old_key = old_entries[i].key;
-            ANY_NAMESPACE old_val = old_entries[i].value;
-            map_put(m, old_key, old_val);
-            free(old_entries[i].key);
+            uint64_t hash = map_hash(old_entries[i].key);
+            size_t index = hash % m->capacity;
+            while (m->entries[index].state != MAP_SLOT_EMPTY) {
+                index = (index + 1) % m->capacity;
+            }
+            m->entries[index].key = old_entries[i].key;
+            m->entries[index].value = old_entries[i].value;
+            m->entries[index].state = MAP_SLOT_OCCUPIED;
         }
     }
     free(old_entries);
@@ -814,6 +891,7 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     double: assign_double,          \
     char*: assign_string,           \
     const char*: assign_string,     \
+    Blob*: assign_blob,             \
     DynamicArray*: assign_array,    \
     HashMap*: assign_map,           \
     default: assign_ptr             \
@@ -827,6 +905,7 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     float*: any_get_float,                              \
     double*: any_get_double,                            \
     const char**: any_get_string,                       \
+    Blob*: any_get_blob,                                \
     DynamicArray**: any_get_arr,                        \
     HashMap**: any_get_map,                             \
     void**: any_get_ptr                                 \
