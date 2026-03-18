@@ -14,11 +14,11 @@
 
 /*TO DO:
  * Making example code and writing docs
+ * Maybe looking at SIMD optimizations after arena
  * Virtual Arena allocator so need an os check for mmap (unix) and VirtualAlloc (Windows)
- * any_clone() and any_equal() for safe assignments and comparisons
  * any_iteration()? for looping through the arrays
  * get_map() and get_array() for nested traversal
- * Checks for gcc/clang and enforce RAII semantics through compiler
+ * Checks for gcc/clang and enforce RAII semantics through compiler and if the compiler doesn't support it then throw a warning inside the ide to manually cleanup memory
  * Synthetic benchmarks compared to other libraries in AWS
  */
 
@@ -29,6 +29,8 @@
 
 typedef enum {
     ANYARR_OK,
+    ANYARR_EQUAL,
+    ANYARR_NOT_EQUAL,
     ANYARR_ERR_OOM,
     ANYARR_ERR_NULLPTR,
     ANYARR_ERR_OUT_OF_BOUNDS,
@@ -82,6 +84,7 @@ typedef struct {
             char small_buf[15];
             // From my testing 15 elements seemed to be much faster than 16 bytes around ~30% on append speeds, going above introduces the next set of bytes in l1 cache which means more padding and more work for cpu
         };
+
         struct {
             uint8_t _type_sbo;
             uint8_t len;
@@ -171,12 +174,12 @@ static inline ANY_NAMESPACE assign_string(const char *s) {
     if (dup == NULL) {
         return any_make_null();
     }
-    memcpy(dup, s, len+1);
+    memcpy(dup, s, len + 1);
     return (ANY_NAMESPACE){.type = TYPE_STRING, .data.s = dup};
 }
 
 
-static inline ANY_NAMESPACE assign_blob(Blob *l) {
+static inline ANY_NAMESPACE assign_blob(const Blob *l) {
     if (l == NULL || l->ptr == NULL) {
         return (ANY_NAMESPACE){TYPE_NULL};
     }
@@ -209,6 +212,7 @@ static inline ANY_NAMESPACE assign_ptr(void *p) {
 
 
 static inline anyarr_result any_init(DynamicArray *buf);
+
 static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
     if (a == NULL) {
         DynamicArray *heap_arr = malloc(sizeof(DynamicArray));
@@ -223,6 +227,7 @@ static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
 
 
 static inline anyarr_result map_init(HashMap *m);
+
 static inline ANY_NAMESPACE assign_map(HashMap *m) {
     if (m == NULL) {
         HashMap *heap_map = malloc(sizeof(HashMap));
@@ -365,15 +370,15 @@ static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char 
 }
 
 
-static inline anyarr_result any_get_blob(const ANY_NAMESPACE *val, Blob *out_value) {
+static inline anyarr_result any_get_blob(ANY_NAMESPACE *val, Blob *out_value) {
     if (val == NULL || out_value == NULL) {
-    return ANYARR_ERR_NULLPTR;
+        return ANYARR_ERR_NULLPTR;
     } else if (val->type == TYPE_BLOB) {
         out_value->ptr = val->data.l->ptr;
         out_value->size = val->data.l->size;
         return ANYARR_OK;
     } else if (val->_type_sbo == TYPE_BLOB_SMALL) {
-        out_value->ptr = (uint8_t *)val->small_blob;
+        out_value->ptr = (uint8_t *) val->small_blob;
         out_value->size = val->len;
         return ANYARR_OK;
     }
@@ -474,14 +479,14 @@ static inline const char *any_as_string_or(const ANY_NAMESPACE *val, const char 
 }
 
 
-static inline Blob any_as_blob_or(const ANY_NAMESPACE *val, Blob fallback) {
+static inline Blob any_as_blob_or(ANY_NAMESPACE *val, Blob fallback) {
     if (val == NULL) {
         return fallback;
     } else if (val->type == TYPE_BLOB) {
         return *val->data.l;
     } else if (val->_type_sbo == TYPE_BLOB_SMALL) {
         Blob temp;
-        temp.ptr = (uint8_t *)val->small_blob;
+        temp.ptr = (uint8_t *) val->small_blob;
         temp.size = val->len;
         return temp;
     }
@@ -514,6 +519,7 @@ static inline void *any_as_ptr_or(const ANY_NAMESPACE *val, void *fallback) {
 
 
 static inline anyarr_result any_free(DynamicArray *buf);
+
 static inline anyarr_result map_free(HashMap *m);
 
 static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
@@ -593,17 +599,17 @@ static inline anyarr_result map_init(HashMap *m) {
 
 static inline anyarr_result map_resize(HashMap *m);
 
-static inline anyarr_result map_put(HashMap *m, char *key, const ANY_NAMESPACE value) {
+static inline anyarr_result map_put(HashMap *m, const char *key, const ANY_NAMESPACE value) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
     if ((m->size + m->deleted_count) >= (m->capacity * 3) / 4) {
-        anyarr_result result = map_resize(m);
+        const anyarr_result result = map_resize(m);
         if (result != ANYARR_OK) {
             return result;
         }
     }
-    uint64_t hash = map_hash(key);
+    const uint64_t hash = map_hash(key);
     size_t index = hash % m->capacity;
     size_t dead_index = SIZE_MAX;
     while (1) {
@@ -617,7 +623,7 @@ static inline anyarr_result map_put(HashMap *m, char *key, const ANY_NAMESPACE v
                 insert_index = index;
             }
             MapEntry *target = &m->entries[insert_index];
-            size_t key_len = strlen(key);
+            const size_t key_len = strlen(key);
             target->key = malloc(key_len + 1);
             if (target->key == NULL) {
                 return ANYARR_ERR_OOM;
@@ -642,11 +648,11 @@ static inline anyarr_result map_put(HashMap *m, char *key, const ANY_NAMESPACE v
 
 
 static inline anyarr_result map_resize(HashMap *m) {
-    if (m->entries == NULL) {
+    if (m == NULL || m->entries == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
     MapEntry *old_entries = m->entries;
-    size_t old_capacity = m->capacity;
+    const size_t old_capacity = m->capacity;
     m->capacity = old_capacity << 1;
     m->entries = calloc(m->capacity, sizeof(MapEntry));
     if (m->entries == NULL) {
@@ -657,7 +663,7 @@ static inline anyarr_result map_resize(HashMap *m) {
     m->deleted_count = 0;
     for (size_t i = 0; i < old_capacity; i++) {
         if (old_entries[i].state == MAP_SLOT_OCCUPIED) {
-            uint64_t hash = map_hash(old_entries[i].key);
+            const uint64_t hash = map_hash(old_entries[i].key);
             size_t index = hash % m->capacity;
             while (m->entries[index].state != MAP_SLOT_EMPTY) {
                 index = (index + 1) % m->capacity;
@@ -672,11 +678,11 @@ static inline anyarr_result map_resize(HashMap *m) {
 }
 
 
-static inline anyarr_result map_get(HashMap *m, char *key, ANY_NAMESPACE **out_value) {
+static inline anyarr_result map_get(HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    uint64_t hash = map_hash(key);
+    const uint64_t hash = map_hash(key);
     size_t index = hash % m->capacity;
     while (1) {
         MapEntry *slot = &m->entries[index];
@@ -697,13 +703,13 @@ static inline anyarr_result map_get(HashMap *m, char *key, ANY_NAMESPACE **out_v
 }
 
 
-static inline anyarr_result map_remove(HashMap *m, char *key) {
+static inline anyarr_result map_remove(HashMap *m, const char *key) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    uint64_t hash = map_hash(key);
+    const uint64_t hash = map_hash(key);
     size_t index = hash % m->capacity;
-    size_t start = index;
+    const size_t start = index;
     do {
         MapEntry *slot = &m->entries[index];
         if (slot->state == MAP_SLOT_EMPTY) {
@@ -790,6 +796,204 @@ static inline anyarr_result any_reserve(DynamicArray *buf, size_t new_capacity) 
     buf->data = temp;
     buf->capacity = new_capacity;
     return ANYARR_OK;
+}
+
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpointer-bool-conversion"
+static inline anyarr_result any_clone(ANY_NAMESPACE *src, ANY_NAMESPACE *dest) {
+    if (src == NULL || dest == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    switch (src->type) {
+        case TYPE_NULL:
+        case TYPE_BOOL:
+        case TYPE_CHAR:
+        case TYPE_INT:
+        case TYPE_UINT:
+        case TYPE_FLOAT:
+        case TYPE_DOUBLE:
+        case TYPE_STRING_SMALL:
+        case TYPE_BLOB_SMALL:
+            *dest = *src;
+            return ANYARR_OK;
+        case TYPE_STRING:
+            *dest = assign_string(src->data.s);
+            if (dest->type == TYPE_NULL) {
+                return ANYARR_ERR_OOM;
+            }
+            return ANYARR_OK;
+        case TYPE_ARRAY: {
+            DynamicArray *src_arr = src->data.a;
+            DynamicArray *new_arr = malloc(sizeof(DynamicArray));
+            if (new_arr == NULL) {
+                return ANYARR_ERR_OOM;
+            }
+            if (any_init(new_arr) != ANYARR_OK) {
+                free(new_arr);
+                return ANYARR_ERR_OOM;
+            }
+            for (size_t i = 0; i < src_arr->size; i++) {
+                Any cloned_elem;
+                anyarr_result res = any_clone(&src_arr->data[i], &cloned_elem);
+                if (res != ANYARR_OK) {
+                    any_free(new_arr);
+                    free(new_arr);
+                    return res;
+                }
+                any_append(new_arr, cloned_elem);
+            }
+            *dest = assign_array(new_arr);
+            return ANYARR_OK;
+        }
+        case TYPE_PTR:
+            *dest = assign_ptr(src->data.p); // Caller owns the lifetime
+            return ANYARR_OK;
+        case TYPE_BLOB: {
+            Blob b;
+            any_get_blob(src, &b);
+            *dest = assign_blob(&b);
+            if (dest->type == TYPE_NULL) {
+                return ANYARR_ERR_OOM;
+            }
+            return ANYARR_OK;
+        }
+        case TYPE_MAP: {
+            HashMap *src_map = src->data.m;
+            HashMap *new_map = malloc(sizeof(HashMap));
+            if (new_map == NULL) {
+                return ANYARR_ERR_OOM;
+            }
+            if (map_init(new_map) != ANYARR_OK) {
+                free(new_map);
+                return ANYARR_ERR_OOM;
+            }
+            for (size_t i = 0; i < src_map->capacity; i++) {
+                if (src_map->entries[i].state != MAP_SLOT_OCCUPIED)
+                    continue;
+                Any cloned_val;
+                anyarr_result res = any_clone(&src_map->entries[i].value, &cloned_val);
+                if (res != ANYARR_OK) {
+                    map_free(new_map);
+                    free(new_map);
+                    return res;
+                }
+                map_put(new_map, src_map->entries[i].key, cloned_val);
+            }
+            *dest = assign_map(new_map);
+            return ANYARR_OK;
+        }
+    }
+    return ANYARR_ERR_TYPE_MISMATCH;
+}
+
+
+static inline anyarr_result any_equal(ANY_NAMESPACE *a, ANY_NAMESPACE *b) {
+    if (a == NULL || b == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (any_is_string(a) && any_is_string(b)) {
+        const char *sa = any_as_string_or(a, NULL);
+        const char *sb = any_as_string_or(b, NULL);
+        if (strcmp(sa, sb) == 0) {
+            return ANYARR_EQUAL;
+        }
+        return ANYARR_NOT_EQUAL;
+    }
+    if (a->type != b->type) {
+        return ANYARR_NOT_EQUAL;
+    }
+    switch (a->type) {
+        case TYPE_NULL:
+            return ANYARR_EQUAL;
+        case TYPE_BOOL:
+            if (a->data.b == b->data.b) {
+                return ANYARR_EQUAL;
+            }
+            return ANYARR_NOT_EQUAL;
+        case TYPE_CHAR:
+            if (a->data.c == b->data.c) {
+                return ANYARR_EQUAL;
+            }
+            return ANYARR_NOT_EQUAL;
+        case TYPE_INT:
+            if (a->data.i == b->data.i) {
+                return ANYARR_EQUAL;
+            }
+            return ANYARR_NOT_EQUAL;
+        case TYPE_UINT:
+            if (a->data.u == b->data.u) {
+                return ANYARR_EQUAL;
+            }
+            return ANYARR_NOT_EQUAL;
+        case TYPE_FLOAT:
+            if (a->data.f == b->data.f) {
+                return ANYARR_EQUAL;
+            }
+            return ANYARR_NOT_EQUAL;
+        case TYPE_DOUBLE:
+            if (a->data.d == b->data.d) {
+                return ANYARR_EQUAL;
+            }
+            return ANYARR_NOT_EQUAL;
+        case TYPE_PTR:
+            if (a->data.p == b->data.p) {
+                return ANYARR_EQUAL;
+            }
+            return ANYARR_NOT_EQUAL;
+        case TYPE_BLOB:
+        case TYPE_BLOB_SMALL: {
+            Blob ba, bb;
+            any_get_blob(a, &ba);
+            any_get_blob(b, &bb);
+            if (ba.size != bb.size) {
+                return ANYARR_NOT_EQUAL;
+            }
+            if (memcmp(ba.ptr, bb.ptr, ba.size) == 0) {
+                return ANYARR_EQUAL;
+            }
+            return ANYARR_NOT_EQUAL;
+        }
+        case TYPE_ARRAY: {
+            DynamicArray *aa = a->data.a;
+            DynamicArray *ab = b->data.a;
+            if (aa->size != ab->size) {
+                return ANYARR_NOT_EQUAL;
+            }
+            for (size_t i = 0; i < aa->size; i++) {
+                anyarr_result res = any_equal(&aa->data[i], &ab->data[i]);
+                if (res != ANYARR_EQUAL) {
+                    return res;
+                }
+            }
+            return ANYARR_EQUAL;
+        }
+        case TYPE_MAP: {
+            HashMap *ma = a->data.m;
+            HashMap *mb = b->data.m;
+            if (ma->size != mb->size) {
+                return ANYARR_NOT_EQUAL;
+            }
+            for (size_t i = 0; i < ma->capacity; i++) {
+                if (ma->entries[i].state != MAP_SLOT_OCCUPIED) {
+                    continue;
+                }
+                ANY_NAMESPACE *val_b;
+                if (map_get(mb, ma->entries[i].key, &val_b) != ANYARR_OK) {
+                    return ANYARR_NOT_EQUAL;
+                }
+                anyarr_result res = any_equal(&ma->entries[i].value, val_b);
+                if (res != ANYARR_EQUAL) {
+                    return res;
+                }
+            }
+            return ANYARR_EQUAL;
+        }
+        case TYPE_STRING:
+        case TYPE_STRING_SMALL:
+            return ANYARR_EQUAL;
+    }
+    return ANYARR_NOT_EQUAL;
 }
 
 
