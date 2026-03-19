@@ -2,7 +2,7 @@
  * This library should work with C11 onwards flawlessly but C99 needs a lot of setup to work and generally not recommended
  * To make it work on C99, you might need to use the GNU C99 standard instead of strict C99 for anonymous structs to work
  * There is also no support for generic macros so remove the macros at the bottom of the file and stick with specific datatypes
- * Another note, cleanup attribute is only a part of GCC/Clang not a part of C standard so if you are not using those compilers you will have to manually free memory
+ * Another note, cleanup attribute is only a part of GCC/Clang not a part of C standard so it won't work with other compilers
  * Also this library is made to be as fast as possible while being easy to use so it's not exactly efficient on memory usage
 */
 
@@ -15,10 +15,8 @@
 /*TO DO:
  * Making example code and writing docs
  * Maybe looking at SIMD optimizations after arena
- * Virtual Arena allocator so need an os check for mmap (unix) and VirtualAlloc (Windows)
  * any_iteration()? for looping through the arrays
  * get_map() and get_array() for nested traversal
- * Checks for gcc/clang and enforce RAII semantics through compiler and if the compiler doesn't support it then throw a warning inside the ide to manually cleanup memory
  * Synthetic benchmarks compared to other libraries in AWS
  */
 
@@ -46,6 +44,10 @@
 
 #ifndef ARENA_COMMIT_CHUNK
 #   define ARENA_COMMIT_CHUNK (16ULL * 1024ULL * 1024ULL)
+#endif
+
+#ifndef ARENA_NAMESPACE
+#   define ARENA_NAMESPACE Arena
 #endif
 
 #ifndef ANY_NAMESPACE
@@ -79,6 +81,190 @@ enum Type {
     TYPE_ARRAY,
     TYPE_MAP
 };
+
+
+typedef struct {
+    uint8_t *base;
+    size_t used;
+    size_t committed;
+    size_t reserved;
+} ARENA_NAMESPACE;
+
+#ifdef ANYARR_IMPLEMENTATION
+ARENA_NAMESPACE anyarr_arena_instance;
+ARENA_NAMESPACE *anyarr_arena = NULL;
+#else
+extern ARENA_NAMESPACE anyarr_arena_instance;
+extern ARENA_NAMESPACE *anyarr_arena;
+#endif
+
+static inline size_t arena_align_up(size_t n) {
+    return (n + 15) & ~15;
+}
+
+
+static inline anyarr_result arena_commit(ARENA_NAMESPACE *a, size_t extra) {
+    size_t new_committed = (a->committed + extra + ARENA_COMMIT_CHUNK - 1) & ~(ARENA_COMMIT_CHUNK - 1);
+    if (new_committed > a->reserved) {
+        new_committed = a->reserved;
+    }
+    if (new_committed <= a->committed) {
+        return ANYARR_ERR_OOM;
+    }
+    size_t delta = new_committed - a->committed;
+#ifdef ANYARR_PLATFORM_WINDOWS
+    if (VirtualAlloc(a->base + a->committed, delta, MEM_COMMIT, PAGE_READWRITE) == NULL) {
+        return ANYARR_ERR_OOM;
+    }
+#else
+    if (mprotect(a->base + a->committed, delta, PROT_READ | PROT_WRITE) != 0) {
+        return ANYARR_ERR_OOM;
+    }
+#endif
+    a->committed = new_committed;
+    return ANYARR_OK;
+}
+
+
+static inline anyarr_result auto_init(void);
+
+static inline anyarr_result arena_alloc(ARENA_NAMESPACE *a, size_t size, void **out) {
+    if (__builtin_expect(anyarr_arena == NULL, 0)) {
+        if (auto_init() != ANYARR_OK) {
+            return ANYARR_ERR_OOM;
+        }
+    }
+    if (a == NULL) {
+        a = anyarr_arena;
+    }
+    if (a->base == NULL || size == 0 || out == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    size_t new_used = a->used + arena_align_up(size);
+    if (new_used > a->reserved) {
+        return ANYARR_ERR_OOM;
+    }
+    if (new_used > a->committed) {
+        if (arena_commit(a, new_used - a->committed) != ANYARR_OK) {
+            return ANYARR_ERR_OOM;
+        }
+    }
+    *out = a->base + a->used;
+    a->used = new_used;
+    return ANYARR_OK;
+}
+
+
+static inline anyarr_result arena_init(ARENA_NAMESPACE *a, size_t reserve_size) {
+    if (a == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (reserve_size == 0) {
+        reserve_size = ANYARR_RESERVE_SIZE;
+    }
+    reserve_size = (reserve_size + ARENA_COMMIT_CHUNK - 1) & ~(ARENA_COMMIT_CHUNK - 1);
+#ifdef ANYARR_PLATFORM_WINDOWS
+    void *base = VirtualAlloc(NULL, reserve_size, MEM_RESERVE, PAGE_NOACCESS);
+    if (base == NULL) {
+        return ANYARR_ERR_OOM;
+    }
+#else
+    void *base = mmap(NULL, reserve_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) {
+        return ANYARR_ERR_OOM;
+    }
+#endif
+    a->base = (uint8_t *) base;
+    a->used = 0;
+    a->committed = 0;
+    a->reserved = reserve_size;
+    return ANYARR_OK;
+}
+
+
+static inline anyarr_result arena_reset(ARENA_NAMESPACE *a) {
+    if (a == NULL || a->base == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    a->used = 0;
+    return ANYARR_OK;
+}
+
+
+static inline anyarr_result arena_free(ARENA_NAMESPACE *a) {
+    if (a == NULL || a->base == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+#ifdef ANYARR_PLATFORM_WINDOWS
+    VirtualFree(a->base, 0, MEM_RELEASE);
+#else
+    munmap(a->base, a->reserved);
+#endif
+    a->base = NULL;
+    a->used = 0;
+    a->committed = 0;
+    a->reserved = 0;
+    return ANYARR_OK;
+}
+
+
+static inline size_t arena_save(ARENA_NAMESPACE *a) {
+    if (a == NULL) {
+        a = anyarr_arena;
+    }
+    return a->used;
+}
+
+static inline void arena_restore(ARENA_NAMESPACE *a, size_t saved) {
+    if (a == NULL) {
+        a = anyarr_arena;
+    }
+    if (saved >= a->used) {
+        return;
+    }
+    memset(a->base + saved, 0, a->used - saved);
+    a->used = saved;
+}
+
+
+#if defined(__GNUC__) || defined(__clang__)
+static inline void checkpoint_cleanup(size_t *cp) {
+    arena_restore(anyarr_arena, *cp);
+}
+#   define ARENA_TEMP __attribute__((cleanup(checkpoint_cleanup))) size_t
+#endif
+
+
+static inline void auto_cleanup(void) {
+    if (anyarr_arena != NULL) {
+        arena_free(anyarr_arena);
+        anyarr_arena = NULL;
+    }
+}
+
+static inline anyarr_result auto_init(void) {
+    if (anyarr_arena != NULL) {
+        return ANYARR_OK;
+    }
+    if (arena_init(&anyarr_arena_instance, 0) != ANYARR_OK) {
+        return ANYARR_ERR_OOM;
+    }
+    anyarr_arena = &anyarr_arena_instance;
+    atexit(auto_cleanup);
+    return ANYARR_OK;
+}
+
+
+#if defined(__GNUC__) || defined(__clang__)
+static inline void arena_cleanup(ARENA_NAMESPACE **ap) {
+    if (ap && *ap) {
+        arena_free(*ap);
+    }
+}
+
+#   define ARENA_SCOPED __attribute__((cleanup(arena_cleanup))) ARENA_NAMESPACE
+#endif
+
 
 typedef struct DynamicArray DynamicArray;
 typedef struct HashMap HashMap;
@@ -150,7 +336,7 @@ struct Blob {
 };
 
 
-static inline ANY_NAMESPACE any_make_null() {
+static inline ANY_NAMESPACE assign_null(void) {
     return (ANY_NAMESPACE){TYPE_NULL};
 }
 
@@ -187,7 +373,7 @@ static inline ANY_NAMESPACE assign_double(const double d) {
 
 static inline ANY_NAMESPACE assign_string(const char *s) {
     if (s == NULL) {
-        return (ANY_NAMESPACE){TYPE_NULL};
+        return assign_null();
     }
     const size_t len = strlen(s);
     if (len < 15) {
@@ -195,9 +381,9 @@ static inline ANY_NAMESPACE assign_string(const char *s) {
         memcpy(val.small_buf, s, len + 1);
         return val;
     }
-    char *dup = malloc(len + 1);
-    if (dup == NULL) {
-        return any_make_null();
+    char *dup;
+    if (arena_alloc(anyarr_arena, len + 1, (void **) &dup) != ANYARR_OK) {
+        return assign_null();
     }
     memcpy(dup, s, len + 1);
     return (ANY_NAMESPACE){.type = TYPE_STRING, .data.s = dup};
@@ -206,21 +392,19 @@ static inline ANY_NAMESPACE assign_string(const char *s) {
 
 static inline ANY_NAMESPACE assign_blob(const Blob *l) {
     if (l == NULL || l->ptr == NULL) {
-        return (ANY_NAMESPACE){TYPE_NULL};
+        return assign_null();
     }
     if (l->size < 15) {
         ANY_NAMESPACE val = {._type_sbo = TYPE_BLOB_SMALL, .len = l->size};
         memcpy(val.small_blob, l->ptr, l->size);
         return val;
     }
-    Blob *dup = malloc(sizeof(Blob));
-    if (dup == NULL) {
-        return any_make_null();
+    Blob *dup;
+    if (arena_alloc(anyarr_arena, sizeof(Blob), (void **) &dup) != ANYARR_OK) {
+        return assign_null();
     }
-    dup->ptr = malloc(l->size);
-    if (dup->ptr == NULL) {
-        free(dup);
-        return any_make_null();
+    if (arena_alloc(anyarr_arena, l->size, (void **) &dup->ptr) != ANYARR_OK) {
+        return assign_null();
     }
     memcpy(dup->ptr, l->ptr, l->size);
     dup->size = l->size;
@@ -230,20 +414,20 @@ static inline ANY_NAMESPACE assign_blob(const Blob *l) {
 
 static inline ANY_NAMESPACE assign_ptr(void *p) {
     if (p == NULL) {
-        return any_make_null();
+        return assign_null();
     }
     return (ANY_NAMESPACE){TYPE_PTR, .data.p = p};
 }
 
 
-static inline anyarr_result any_init(DynamicArray *buf);
+static inline anyarr_result array_init(DynamicArray *buf);
 
 static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
     if (a == NULL) {
-        DynamicArray *heap_arr = malloc(sizeof(DynamicArray));
-        if (heap_arr == NULL || any_init(heap_arr) != ANYARR_OK) {
-            free(heap_arr);
-            return any_make_null();
+        DynamicArray *heap_arr;
+        if (arena_alloc(anyarr_arena, sizeof(DynamicArray), (void **) &heap_arr) != ANYARR_OK || array_init(heap_arr) !=
+            ANYARR_OK) {
+            return assign_null();
         }
         return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = heap_arr};
     }
@@ -255,10 +439,10 @@ static inline anyarr_result map_init(HashMap *m);
 
 static inline ANY_NAMESPACE assign_map(HashMap *m) {
     if (m == NULL) {
-        HashMap *heap_map = malloc(sizeof(HashMap));
-        if (heap_map == NULL || map_init(heap_map) != ANYARR_OK) {
-            free(heap_map);
-            return any_make_null();
+        HashMap *heap_map;
+        if (arena_alloc(anyarr_arena, sizeof(HashMap), (void **) &heap_map) != ANYARR_OK || map_init(heap_map) !=
+            ANYARR_OK) {
+            return assign_null();
         }
         return (ANY_NAMESPACE){TYPE_MAP, .data.m = heap_map};
     }
@@ -422,7 +606,7 @@ static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_val
 }
 
 
-static inline anyarr_result any_get_arr(const ANY_NAMESPACE *val, DynamicArray **out_value) {
+static inline anyarr_result any_get_array(const ANY_NAMESPACE *val, DynamicArray **out_value) {
     if (val == NULL || out_value == NULL) {
         return ANYARR_ERR_NULLPTR;
     } else if (val->type != TYPE_ARRAY) {
@@ -543,7 +727,7 @@ static inline void *any_as_ptr_or(const ANY_NAMESPACE *val, void *fallback) {
 }
 
 
-static inline anyarr_result any_free(DynamicArray *buf);
+static inline anyarr_result array_free(DynamicArray *buf);
 
 static inline anyarr_result map_free(HashMap *m);
 
@@ -551,22 +735,13 @@ static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
     if (val == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if (val->type == TYPE_STRING) {
-        free(val->data.s);
-    }
-    if (val->type == TYPE_BLOB) {
-        free(val->data.l->ptr);
-        free(val->data.l);
-    }
     if (val->type == TYPE_ARRAY) {
-        any_free(val->data.a);
-        free(val->data.a);
+        array_free(val->data.a);
     }
     if (val->type == TYPE_MAP) {
         map_free(val->data.m);
-        free(val->data.m);
     }
-    *val = any_make_null();
+    *val = assign_null();
     return ANYARR_OK;
 }
 
@@ -591,17 +766,17 @@ static inline uint64_t map_hash(const char *key) {
 }
 
 
-static inline anyarr_result any_init(DynamicArray *buf) {
+static inline anyarr_result array_init(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
     buf->size = 0;
     buf->capacity = 4;
-    buf->data = calloc(buf->capacity, sizeof(ANY_NAMESPACE));
-    if (buf->data == NULL) {
+    if (arena_alloc(anyarr_arena, buf->capacity * sizeof(ANY_NAMESPACE), (void **) &buf->data) != ANYARR_OK) {
         buf->capacity = 0;
         return ANYARR_ERR_OOM;
     }
+    memset(buf->data, 0, buf->capacity * sizeof(ANY_NAMESPACE));
     return ANYARR_OK;
 }
 
@@ -613,11 +788,11 @@ static inline anyarr_result map_init(HashMap *m) {
     m->size = 0;
     m->deleted_count = 0;
     m->capacity = 16;
-    m->entries = calloc(m->capacity, sizeof(MapEntry));
-    if (m->entries == NULL) {
+    if (arena_alloc(anyarr_arena, m->capacity * sizeof(MapEntry), (void **) &m->entries) != ANYARR_OK) {
         m->capacity = 0;
         return ANYARR_ERR_OOM;
     }
+    memset(m->entries, 0, m->capacity * sizeof(MapEntry));
     return ANYARR_OK;
 }
 
@@ -649,8 +824,7 @@ static inline anyarr_result map_put(HashMap *m, const char *key, const ANY_NAMES
             }
             MapEntry *target = &m->entries[insert_index];
             const size_t key_len = strlen(key);
-            target->key = malloc(key_len + 1);
-            if (target->key == NULL) {
+            if (arena_alloc(anyarr_arena, key_len + 1, (void **) &target->key) != ANYARR_OK) {
                 return ANYARR_ERR_OOM;
             }
             memcpy(target->key, key, key_len + 1);
@@ -679,12 +853,12 @@ static inline anyarr_result map_resize(HashMap *m) {
     MapEntry *old_entries = m->entries;
     const size_t old_capacity = m->capacity;
     m->capacity = old_capacity << 1;
-    m->entries = calloc(m->capacity, sizeof(MapEntry));
-    if (m->entries == NULL) {
+    if (arena_alloc(anyarr_arena, m->capacity * sizeof(MapEntry), (void **) &m->entries) != ANYARR_OK) {
         m->entries = old_entries;
         m->capacity = old_capacity;
         return ANYARR_ERR_OOM;
     }
+    memset(m->entries, 0, m->capacity * sizeof(MapEntry));
     m->deleted_count = 0;
     for (size_t i = 0; i < old_capacity; i++) {
         if (old_entries[i].state == MAP_SLOT_OCCUPIED) {
@@ -698,7 +872,6 @@ static inline anyarr_result map_resize(HashMap *m) {
             m->entries[index].state = MAP_SLOT_OCCUPIED;
         }
     }
-    free(old_entries);
     return ANYARR_OK;
 }
 
@@ -709,22 +882,19 @@ static inline anyarr_result map_get(HashMap *m, const char *key, ANY_NAMESPACE *
     }
     const uint64_t hash = map_hash(key);
     size_t index = hash % m->capacity;
-    while (1) {
+    const size_t start = index;
+    do {
         MapEntry *slot = &m->entries[index];
         if (slot->state == MAP_SLOT_EMPTY) {
             return ANYARR_ERR_EMPTY;
-        }
-        if (slot->state == MAP_SLOT_DELETED) {
-            index = (index + 1) % m->capacity;
-            continue;
         }
         if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
             *out_value = &slot->value;
             return ANYARR_OK;
         }
         index = (index + 1) % m->capacity;
-    }
-    return ANYARR_ERR_OUT_OF_BOUNDS;
+    } while (index != start);
+    return ANYARR_ERR_EMPTY;
 }
 
 
@@ -742,7 +912,6 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
         }
         if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
             any_destroy(&slot->value);
-            free(slot->key);
             slot->state = MAP_SLOT_DELETED;
             m->size--;
             m->deleted_count++;
@@ -754,30 +923,53 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
 }
 
 
-static inline anyarr_result any_append(DynamicArray *buf, const ANY_NAMESPACE value) {
+static inline anyarr_result array_append(DynamicArray *buf, const ANY_NAMESPACE value) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
     if (buf->size == buf->capacity) {
-        size_t new_capacity;
-        if (buf->capacity == 0) {
-            new_capacity = 4;
-        } else {
+        size_t new_capacity = 4;
+        if (buf->capacity != 0) {
             new_capacity = buf->capacity + (buf->capacity >> 1);
         }
-        ANY_NAMESPACE *temp = realloc(buf->data, new_capacity * sizeof(ANY_NAMESPACE));
-        if (temp == NULL) {
-            return ANYARR_ERR_OOM;
+        size_t old_bytes = arena_align_up(buf->capacity * sizeof(ANY_NAMESPACE));
+        size_t new_bytes = arena_align_up(new_capacity * sizeof(ANY_NAMESPACE));
+        _Bool at_tip = (buf->data != NULL) && ((uint8_t *)buf->data + old_bytes == anyarr_arena->base + anyarr_arena->used);
+        if (at_tip) {
+            size_t extra = new_bytes - old_bytes;
+            size_t new_used = anyarr_arena->used + extra;
+            if (new_used > anyarr_arena->reserved) {
+                return ANYARR_ERR_OOM;
+            }
+            if (new_used > anyarr_arena->committed) {
+                if (arena_commit(anyarr_arena, new_used - anyarr_arena->committed) != ANYARR_OK) {
+                    return ANYARR_ERR_OOM;
+                }
+            }
+            memset((uint8_t *)buf->data + buf->capacity * sizeof(ANY_NAMESPACE),
+                   0,
+                   (new_capacity - buf->capacity) * sizeof(ANY_NAMESPACE));
+            anyarr_arena->used = new_used;
+            buf->capacity = new_capacity;
+        } else {
+            ANY_NAMESPACE *temp;
+            if (arena_alloc(anyarr_arena, new_capacity * sizeof(ANY_NAMESPACE), (void **) &temp) != ANYARR_OK) {
+                return ANYARR_ERR_OOM;
+            }
+            if (buf->size > 0 && buf->data != NULL) {
+                memcpy(temp, buf->data, buf->size * sizeof(ANY_NAMESPACE));
+            }
+            memset(temp + buf->size, 0, (new_capacity - buf->size) * sizeof(ANY_NAMESPACE));
+            buf->data = temp;
+            buf->capacity = new_capacity;
         }
-        buf->data = temp;
-        buf->capacity = new_capacity;
     }
     buf->data[buf->size++] = value;
     return ANYARR_OK;
 }
 
 
-static inline anyarr_result any_remove_index(DynamicArray *buf, size_t index) {
+static inline anyarr_result array_remove_index(DynamicArray *buf, size_t index) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
@@ -794,7 +986,7 @@ static inline anyarr_result any_remove_index(DynamicArray *buf, size_t index) {
 }
 
 
-static inline anyarr_result any_set_index(DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
+static inline anyarr_result array_set_index(DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
@@ -807,16 +999,19 @@ static inline anyarr_result any_set_index(DynamicArray *buf, const size_t index,
 }
 
 
-static inline anyarr_result any_reserve(DynamicArray *buf, size_t new_capacity) {
+static inline anyarr_result array_reserve(DynamicArray *buf, size_t new_capacity) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
     if (new_capacity <= buf->capacity) {
         return ANYARR_OK;
     }
-    ANY_NAMESPACE *temp = realloc(buf->data, new_capacity * sizeof(ANY_NAMESPACE));
-    if (temp == NULL) {
+    ANY_NAMESPACE *temp;
+    if (arena_alloc(anyarr_arena, new_capacity * sizeof(ANY_NAMESPACE), (void **) &temp) != ANYARR_OK) {
         return ANYARR_ERR_OOM;
+    }
+    if (buf->size > 0 && buf->data != NULL) {
+        memcpy(temp, buf->data, buf->size * sizeof(ANY_NAMESPACE));
     }
     buf->data = temp;
     buf->capacity = new_capacity;
@@ -824,9 +1019,7 @@ static inline anyarr_result any_reserve(DynamicArray *buf, size_t new_capacity) 
 }
 
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpointer-bool-conversion"
-static inline anyarr_result any_clone(ANY_NAMESPACE *src, ANY_NAMESPACE *dest) {
+static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *dest) {
     if (src == NULL || dest == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
@@ -850,33 +1043,31 @@ static inline anyarr_result any_clone(ANY_NAMESPACE *src, ANY_NAMESPACE *dest) {
             return ANYARR_OK;
         case TYPE_ARRAY: {
             DynamicArray *src_arr = src->data.a;
-            DynamicArray *new_arr = malloc(sizeof(DynamicArray));
-            if (new_arr == NULL) {
+            DynamicArray *new_arr;
+            if (arena_alloc(anyarr_arena, sizeof(DynamicArray), (void **) &new_arr) != ANYARR_OK) {
                 return ANYARR_ERR_OOM;
             }
-            if (any_init(new_arr) != ANYARR_OK) {
-                free(new_arr);
+            if (array_init(new_arr) != ANYARR_OK) {
                 return ANYARR_ERR_OOM;
             }
             for (size_t i = 0; i < src_arr->size; i++) {
-                Any cloned_elem;
+                ANY_NAMESPACE cloned_elem;
                 anyarr_result res = any_clone(&src_arr->data[i], &cloned_elem);
                 if (res != ANYARR_OK) {
-                    any_free(new_arr);
-                    free(new_arr);
+                    array_free(new_arr);
                     return res;
                 }
-                any_append(new_arr, cloned_elem);
+                array_append(new_arr, cloned_elem);
             }
             *dest = assign_array(new_arr);
             return ANYARR_OK;
         }
         case TYPE_PTR:
-            *dest = assign_ptr(src->data.p); // Caller owns the lifetime
+            *dest = assign_ptr(src->data.p);
             return ANYARR_OK;
         case TYPE_BLOB: {
             Blob b;
-            any_get_blob(src, &b);
+            any_get_blob((ANY_NAMESPACE *) src, &b);
             *dest = assign_blob(&b);
             if (dest->type == TYPE_NULL) {
                 return ANYARR_ERR_OOM;
@@ -885,22 +1076,21 @@ static inline anyarr_result any_clone(ANY_NAMESPACE *src, ANY_NAMESPACE *dest) {
         }
         case TYPE_MAP: {
             HashMap *src_map = src->data.m;
-            HashMap *new_map = malloc(sizeof(HashMap));
-            if (new_map == NULL) {
+            HashMap *new_map;
+            if (arena_alloc(anyarr_arena, sizeof(HashMap), (void **) &new_map) != ANYARR_OK) {
                 return ANYARR_ERR_OOM;
             }
             if (map_init(new_map) != ANYARR_OK) {
-                free(new_map);
                 return ANYARR_ERR_OOM;
             }
             for (size_t i = 0; i < src_map->capacity; i++) {
-                if (src_map->entries[i].state != MAP_SLOT_OCCUPIED)
+                if (src_map->entries[i].state != MAP_SLOT_OCCUPIED) {
                     continue;
-                Any cloned_val;
+                }
+                ANY_NAMESPACE cloned_val;
                 anyarr_result res = any_clone(&src_map->entries[i].value, &cloned_val);
                 if (res != ANYARR_OK) {
                     map_free(new_map);
-                    free(new_map);
                     return res;
                 }
                 map_put(new_map, src_map->entries[i].key, cloned_val);
@@ -917,6 +1107,7 @@ static inline anyarr_result any_equal(ANY_NAMESPACE *a, ANY_NAMESPACE *b) {
     if (a == NULL || b == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
+
     if (any_is_string(a) && any_is_string(b)) {
         const char *sa = any_as_string_or(a, NULL);
         const char *sb = any_as_string_or(b, NULL);
@@ -925,9 +1116,24 @@ static inline anyarr_result any_equal(ANY_NAMESPACE *a, ANY_NAMESPACE *b) {
         }
         return ANYARR_NOT_EQUAL;
     }
+
+    if (any_is_blob(a) && any_is_blob(b)) {
+        Blob ba, bb;
+        any_get_blob(a, &ba);
+        any_get_blob(b, &bb);
+        if (ba.size != bb.size) {
+            return ANYARR_NOT_EQUAL;
+        }
+        if (memcmp(ba.ptr, bb.ptr, ba.size) == 0) {
+            return ANYARR_EQUAL;
+        }
+        return ANYARR_NOT_EQUAL;
+    }
+
     if (a->type != b->type) {
         return ANYARR_NOT_EQUAL;
     }
+
     switch (a->type) {
         case TYPE_NULL:
             return ANYARR_EQUAL;
@@ -966,19 +1172,6 @@ static inline anyarr_result any_equal(ANY_NAMESPACE *a, ANY_NAMESPACE *b) {
                 return ANYARR_EQUAL;
             }
             return ANYARR_NOT_EQUAL;
-        case TYPE_BLOB:
-        case TYPE_BLOB_SMALL: {
-            Blob ba, bb;
-            any_get_blob(a, &ba);
-            any_get_blob(b, &bb);
-            if (ba.size != bb.size) {
-                return ANYARR_NOT_EQUAL;
-            }
-            if (memcmp(ba.ptr, bb.ptr, ba.size) == 0) {
-                return ANYARR_EQUAL;
-            }
-            return ANYARR_NOT_EQUAL;
-        }
         case TYPE_ARRAY: {
             DynamicArray *aa = a->data.a;
             DynamicArray *ab = b->data.a;
@@ -1014,35 +1207,13 @@ static inline anyarr_result any_equal(ANY_NAMESPACE *a, ANY_NAMESPACE *b) {
             }
             return ANYARR_EQUAL;
         }
-        case TYPE_STRING:
-        case TYPE_STRING_SMALL:
-            return ANYARR_EQUAL;
+        default:
+            return ANYARR_ERR_TYPE_MISMATCH;
     }
-    return ANYARR_NOT_EQUAL;
 }
 
 
-static inline anyarr_result any_shrink_to_fit(DynamicArray *buf) {
-    if (buf == NULL) {
-        return ANYARR_ERR_NULLPTR;
-    }
-    if (buf->size == 0) {
-        free(buf->data);
-        buf->data = NULL;
-        buf->capacity = 0;
-        return ANYARR_OK;
-    }
-    ANY_NAMESPACE *temp = realloc(buf->data, buf->size * sizeof(ANY_NAMESPACE));
-    if (temp == NULL) {
-        return ANYARR_ERR_OOM;
-    }
-    buf->data = temp;
-    buf->capacity = buf->size;
-    return ANYARR_OK;
-}
-
-
-static inline anyarr_result any_pop(DynamicArray *buf) {
+static inline anyarr_result array_pop(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
@@ -1055,7 +1226,7 @@ static inline anyarr_result any_pop(DynamicArray *buf) {
 }
 
 
-static inline anyarr_result any_clear(DynamicArray *buf) {
+static inline anyarr_result array_clear(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
@@ -1067,14 +1238,13 @@ static inline anyarr_result any_clear(DynamicArray *buf) {
 }
 
 
-static inline anyarr_result any_free(DynamicArray *buf) {
+static inline anyarr_result array_free(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
     for (size_t i = 0; i < buf->size; i++) {
         any_destroy(&buf->data[i]);
     }
-    free(buf->data);
     buf->data = NULL;
     buf->size = 0;
     buf->capacity = 0;
@@ -1088,11 +1258,9 @@ static inline anyarr_result map_free(HashMap *m) {
     }
     for (size_t i = 0; i < m->capacity; i++) {
         if (m->entries[i].state == MAP_SLOT_OCCUPIED) {
-            free(m->entries[i].key);
             any_destroy(&m->entries[i].value);
         }
     }
-    free(m->entries);
     m->entries = NULL;
     m->size = 0;
     m->capacity = 0;
@@ -1100,7 +1268,25 @@ static inline anyarr_result map_free(HashMap *m) {
 }
 
 
-static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
+static inline void array_cleanup(DynamicArray *ap) {
+    if (ap) {
+        array_free(ap);
+    }
+}
+
+static inline void map_cleanup(HashMap *mp) {
+    if (mp) {
+        map_free(mp);
+    }
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+#   define ARRAY_SCOPED __attribute__((cleanup(array_cleanup))) DynamicArray
+#   define MAP_SCOPED   __attribute__((cleanup(map_cleanup))) HashMap
+#endif
+
+
+static inline const ANY_NAMESPACE *array_at(const DynamicArray *buf, size_t idx) {
     if (buf == NULL || idx >= buf->size) {
         return NULL;
     }
@@ -1140,13 +1326,13 @@ static inline const ANY_NAMESPACE *any_at(const DynamicArray *buf, size_t idx) {
     double*: any_get_double,                            \
     const char**: any_get_string,                       \
     Blob*: any_get_blob,                                \
-    DynamicArray**: any_get_arr,                        \
+    DynamicArray**: any_get_array,                      \
     HashMap**: any_get_map,                             \
     void**: any_get_ptr                                 \
 )(val_ptr, out_ptr)
 
 #define get_at(buf_ptr, index, out_ptr) \
-get_any(any_at((buf_ptr), (index)), (out_ptr))
+get_any(array_at((buf_ptr), (index)), (out_ptr))
 
 #define update_any(target_ptr, val) any_reassign((target_ptr), assign_any(val))
 
