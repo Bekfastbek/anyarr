@@ -22,9 +22,34 @@
  * Synthetic benchmarks compared to other libraries in AWS
  */
 
+#if defined(_WIN32) || defined(_WIN64)
+#   define ANYARR_PLATFORM_WINDOWS
+#   ifndef WIN32_LEAN_AND_MEAN
+#       define WIN32_LEAN_AND_MEAN
+#   endif
+#   include <windows.h>
+#else
+#   define ANYARR_PLATFORM_POSIX
+#   include <sys/mman.h>
+#   ifndef MAP_ANONYMOUS
+#       define MAP_ANONYMOUS MAP_ANON
+#   endif
+#endif
 
-#ifndef ANY_NAMESPACE // just a QOL feature, they can rename "Any" to prevent namespace pollution
-#define ANY_NAMESPACE Any
+#ifndef ANYARR_RESERVE_SIZE
+#   ifdef ANYARR_PLATFORM_WINDOWS
+#       define ANYARR_RESERVE_SIZE (8ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL)
+#   else
+#       define ANYARR_RESERVE_SIZE (128ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL)
+#   endif
+#endif
+
+#ifndef ARENA_COMMIT_CHUNK
+#   define ARENA_COMMIT_CHUNK (16ULL * 1024ULL * 1024ULL)
+#endif
+
+#ifndef ANY_NAMESPACE
+#   define ANY_NAMESPACE Any
 #endif
 
 typedef enum {
