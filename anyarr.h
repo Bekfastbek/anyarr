@@ -14,9 +14,9 @@
 
 /*TO DO:
  * Making example code and writing docs
+ * Replace SlotStates with Robin Hood's PSL system in hashmap
  * Maybe looking at SIMD optimizations after arena
- * any_iteration()? for looping through the arrays
- * get_map() and get_array() for nested traversal
+ * any_iteration() for looping through the arrays (important)
  * Synthetic benchmarks compared to other libraries in AWS
  */
 
@@ -129,11 +129,19 @@ static inline anyarr_result arena_commit(ARENA_NAMESPACE *a, size_t extra) {
 static inline anyarr_result auto_init(void);
 
 static inline anyarr_result arena_alloc(ARENA_NAMESPACE *a, size_t size, void **out) {
+#if defined(__GNUC__) || defined(__clang__)
     if (__builtin_expect(anyarr_arena == NULL, 0)) {
         if (auto_init() != ANYARR_OK) {
             return ANYARR_ERR_OOM;
         }
     }
+#else
+    if (anyarr_arena == NULL) {
+        if (auto_init() != ANYARR_OK) {
+            return ANYARR_ERR_OOM;
+        }
+    }
+#endif
     if (a == NULL) {
         a = anyarr_arena;
     }
@@ -256,13 +264,12 @@ static inline anyarr_result auto_init(void) {
 
 
 #if defined(__GNUC__) || defined(__clang__)
-static inline void arena_cleanup(ARENA_NAMESPACE **ap) {
-    if (ap && *ap) {
-        arena_free(*ap);
+static inline void arena_cleanup(ARENA_NAMESPACE *ap) {
+    if (ap) {
+        arena_free(ap);
     }
 }
-
-#   define ARENA_SCOPED __attribute__((cleanup(arena_cleanup))) ARENA_NAMESPACE
+#   define ARENA_SCOPED __attribute__((cleanup(arena_cleanup))) ARENA_NAMESPACE = {0}
 #endif
 
 
@@ -727,35 +734,6 @@ static inline void *any_as_ptr_or(const ANY_NAMESPACE *val, void *fallback) {
 }
 
 
-static inline anyarr_result array_free(DynamicArray *buf);
-
-static inline anyarr_result map_free(HashMap *m);
-
-static inline anyarr_result any_destroy(ANY_NAMESPACE *val) {
-    if (val == NULL) {
-        return ANYARR_ERR_NULLPTR;
-    }
-    if (val->type == TYPE_ARRAY) {
-        array_free(val->data.a);
-    }
-    if (val->type == TYPE_MAP) {
-        map_free(val->data.m);
-    }
-    *val = assign_null();
-    return ANYARR_OK;
-}
-
-
-static inline anyarr_result any_reassign(ANY_NAMESPACE *target, const ANY_NAMESPACE new_val) {
-    if (target == NULL) {
-        return ANYARR_ERR_NULLPTR;
-    }
-    any_destroy(target);
-    *target = new_val;
-    return ANYARR_OK;
-}
-
-
 static inline uint64_t map_hash(const char *key) {
     uint64_t hash = 14695981039346656037ULL;
     while (*key) {
@@ -834,7 +812,6 @@ static inline anyarr_result map_put(HashMap *m, const char *key, const ANY_NAMES
             return ANYARR_OK;
         }
         if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
-            any_destroy(&slot->value);
             slot->value = value;
             return ANYARR_OK;
         }
@@ -911,7 +888,6 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
             break;
         }
         if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
-            any_destroy(&slot->value);
             slot->state = MAP_SLOT_DELETED;
             m->size--;
             m->deleted_count++;
@@ -976,7 +952,6 @@ static inline anyarr_result array_remove_index(DynamicArray *buf, size_t index) 
     if (index >= buf->size) {
         return ANYARR_ERR_OUT_OF_BOUNDS;
     }
-    any_destroy(&buf->data[index]);
     const size_t index_queue = buf->size - index - 1;
     if (index_queue > 0) {
         memmove(&buf->data[index], &buf->data[index + 1], index_queue * sizeof(ANY_NAMESPACE));
@@ -993,8 +968,64 @@ static inline anyarr_result array_set_index(DynamicArray *buf, const size_t inde
     if (index >= buf->size) {
         return ANYARR_ERR_OUT_OF_BOUNDS;
     }
-    any_destroy(&buf->data[index]);
     buf->data[index] = value;
+    return ANYARR_OK;
+}
+
+
+static inline anyarr_result array_get(DynamicArray *buf, size_t index, ANY_NAMESPACE **out_value) {
+    if (buf == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    if (index >= buf->size) {
+        return ANYARR_ERR_OUT_OF_BOUNDS;
+    }
+
+    *out_value = &buf->data[index];
+    return ANYARR_OK;
+}
+
+
+static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, ANY_NAMESPACE **out_value) {
+    if (root == NULL || path == NULL || out_value == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    ANY_NAMESPACE *current = root;
+    const char *p = path;
+    char segment[256];
+    while (*p != '\0') {
+        while (*p == '.' || *p == '[' || *p == ']') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        size_t i = 0;
+        while (*p != '\0' && *p != '.' && *p != '[' && *p != ']') {
+            if (i >= sizeof(segment) - 1) {
+                return ANYARR_ERR_OUT_OF_BOUNDS;
+            }
+            segment[i++] = *p++;
+        }
+        segment[i] = '\0';
+        if (current->type == TYPE_MAP) {
+            if (map_get(current->data.m, segment, &current) != ANYARR_OK) {
+                return ANYARR_ERR_EMPTY;
+            }
+        } else if (current->type == TYPE_ARRAY) {
+            char *end_ptr;
+            size_t index = strtoull(segment, &end_ptr, 10);
+            if (*end_ptr != '\0') {
+                return ANYARR_ERR_TYPE_MISMATCH;
+            }
+            if (array_get(current->data.a, index, &current) != ANYARR_OK) {
+                return ANYARR_ERR_OUT_OF_BOUNDS;
+            }
+        } else {
+            return ANYARR_ERR_TYPE_MISMATCH;
+        }
+    }
+    *out_value = current;
     return ANYARR_OK;
 }
 
@@ -1054,10 +1085,11 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
                 ANY_NAMESPACE cloned_elem;
                 anyarr_result res = any_clone(&src_arr->data[i], &cloned_elem);
                 if (res != ANYARR_OK) {
-                    array_free(new_arr);
                     return res;
                 }
-                array_append(new_arr, cloned_elem);
+                if (array_append(new_arr, cloned_elem) != ANYARR_OK) {
+                    return ANYARR_ERR_OOM;
+                }
             }
             *dest = assign_array(new_arr);
             return ANYARR_OK;
@@ -1090,10 +1122,11 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
                 ANY_NAMESPACE cloned_val;
                 anyarr_result res = any_clone(&src_map->entries[i].value, &cloned_val);
                 if (res != ANYARR_OK) {
-                    map_free(new_map);
                     return res;
                 }
-                map_put(new_map, src_map->entries[i].key, cloned_val);
+                if (map_put(new_map, src_map->entries[i].key, cloned_val) != ANYARR_OK) {
+                    return ANYARR_ERR_OOM;
+                }
             }
             *dest = assign_map(new_map);
             return ANYARR_OK;
@@ -1220,7 +1253,6 @@ static inline anyarr_result array_pop(DynamicArray *buf) {
     if (buf->size == 0) {
         return ANYARR_ERR_EMPTY;
     }
-    any_destroy(&buf->data[buf->size - 1]);
     buf->size--;
     return ANYARR_OK;
 }
@@ -1230,60 +1262,9 @@ static inline anyarr_result array_clear(DynamicArray *buf) {
     if (buf == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    for (size_t i = 0; i < buf->size; i++) {
-        any_destroy(&buf->data[i]);
-    }
     buf->size = 0;
     return ANYARR_OK;
 }
-
-
-static inline anyarr_result array_free(DynamicArray *buf) {
-    if (buf == NULL) {
-        return ANYARR_ERR_NULLPTR;
-    }
-    for (size_t i = 0; i < buf->size; i++) {
-        any_destroy(&buf->data[i]);
-    }
-    buf->data = NULL;
-    buf->size = 0;
-    buf->capacity = 0;
-    return ANYARR_OK;
-}
-
-
-static inline anyarr_result map_free(HashMap *m) {
-    if (m == NULL) {
-        return ANYARR_ERR_NULLPTR;
-    }
-    for (size_t i = 0; i < m->capacity; i++) {
-        if (m->entries[i].state == MAP_SLOT_OCCUPIED) {
-            any_destroy(&m->entries[i].value);
-        }
-    }
-    m->entries = NULL;
-    m->size = 0;
-    m->capacity = 0;
-    return ANYARR_OK;
-}
-
-
-static inline void array_cleanup(DynamicArray *ap) {
-    if (ap) {
-        array_free(ap);
-    }
-}
-
-static inline void map_cleanup(HashMap *mp) {
-    if (mp) {
-        map_free(mp);
-    }
-}
-
-#if defined(__GNUC__) || defined(__clang__)
-#   define ARRAY_SCOPED __attribute__((cleanup(array_cleanup))) DynamicArray
-#   define MAP_SCOPED   __attribute__((cleanup(map_cleanup))) HashMap
-#endif
 
 
 static inline const ANY_NAMESPACE *array_at(const DynamicArray *buf, size_t idx) {
@@ -1333,8 +1314,6 @@ static inline const ANY_NAMESPACE *array_at(const DynamicArray *buf, size_t idx)
 
 #define get_at(buf_ptr, index, out_ptr) \
 get_any(array_at((buf_ptr), (index)), (out_ptr))
-
-#define update_any(target_ptr, val) any_reassign((target_ptr), assign_any(val))
 
 
 #endif
