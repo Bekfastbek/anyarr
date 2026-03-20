@@ -14,9 +14,7 @@
 
 /*TO DO:
  * Making example code and writing docs
- * Replace SlotStates with Robin Hood's PSL system in hashmap
  * Maybe looking at SIMD optimizations after arena
- * any_iteration() for looping through the arrays (important)
  * Synthetic benchmarks compared to other libraries in AWS
  */
 
@@ -318,21 +316,14 @@ struct DynamicArray {
     size_t capacity;
 };
 
-typedef enum {
-    MAP_SLOT_EMPTY,
-    MAP_SLOT_OCCUPIED,
-    MAP_SLOT_DELETED
-} MapSlotState;
-
 typedef struct {
     char *key;
     ANY_NAMESPACE value;
-    MapSlotState state;
+    int32_t psl;
 } MapEntry;
 
 struct HashMap {
     MapEntry *entries;
-    size_t deleted_count;
     size_t size;
     size_t capacity;
 };
@@ -764,61 +755,86 @@ static inline anyarr_result map_init(HashMap *m) {
         return ANYARR_ERR_NULLPTR;
     }
     m->size = 0;
-    m->deleted_count = 0;
     m->capacity = 16;
     if (arena_alloc(anyarr_arena, m->capacity * sizeof(MapEntry), (void **) &m->entries) != ANYARR_OK) {
         m->capacity = 0;
         return ANYARR_ERR_OOM;
     }
-    memset(m->entries, 0, m->capacity * sizeof(MapEntry));
+    for (size_t i = 0; i < m->capacity; i++) {
+        m->entries[i].psl = -1;
+    }
     return ANYARR_OK;
 }
 
 
 static inline anyarr_result map_resize(HashMap *m);
 
+
+static inline anyarr_result map_get(HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+    if (m == NULL || m->entries == NULL || key == NULL) {
+        return ANYARR_ERR_NULLPTR;
+    }
+    size_t index = map_hash(key) % m->capacity;
+    int32_t psl = 0;
+    while (1) {
+        MapEntry *slot = &m->entries[index];
+        if (slot->psl < 0 || slot->psl < psl) {
+            return ANYARR_ERR_EMPTY;
+        }
+        if (strcmp(slot->key, key) == 0) {
+            *out_value = &slot->value;
+            return ANYARR_OK;
+        }
+        index = (index + 1) % m->capacity;
+        psl++;
+    }
+}
+
+
 static inline anyarr_result map_put(HashMap *m, const char *key, const ANY_NAMESPACE value) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    if ((m->size + m->deleted_count) >= (m->capacity * 3) / 4) {
-        const anyarr_result result = map_resize(m);
-        if (result != ANYARR_OK) {
-            return result;
+    ANY_NAMESPACE *existing;
+    if (map_get(m, key, &existing) == ANYARR_OK) {
+        *existing = value;
+        return ANYARR_OK;
+    }
+    if ((m->size + 1) * 4 >= m->capacity * 3) {
+        anyarr_result r = map_resize(m);
+        if (r != ANYARR_OK) {
+            return r;
         }
     }
-    const uint64_t hash = map_hash(key);
-    size_t index = hash % m->capacity;
-    size_t dead_index = SIZE_MAX;
+    const size_t key_len = strlen(key);
+    char *current_key;
+    if (arena_alloc(anyarr_arena, key_len + 1, (void **) &current_key) != ANYARR_OK) {
+        return ANYARR_ERR_OOM;
+    }
+    memcpy(current_key, key, key_len + 1);
+    ANY_NAMESPACE current_val = value;
+    int32_t current_psl = 0;
+    size_t index = map_hash(key) % m->capacity;
     while (1) {
         MapEntry *slot = &m->entries[index];
-        if (slot->state == MAP_SLOT_EMPTY) {
-            size_t insert_index;
-            if (dead_index != SIZE_MAX) {
-                insert_index = dead_index;
-                m->deleted_count--;
-            } else {
-                insert_index = index;
-            }
-            MapEntry *target = &m->entries[insert_index];
-            const size_t key_len = strlen(key);
-            if (arena_alloc(anyarr_arena, key_len + 1, (void **) &target->key) != ANYARR_OK) {
-                return ANYARR_ERR_OOM;
-            }
-            memcpy(target->key, key, key_len + 1);
-            target->value = value;
-            target->state = MAP_SLOT_OCCUPIED;
+        if (slot->psl < 0) {
+            slot->key = current_key; slot->value = current_val; slot->psl = current_psl;
             m->size++;
             return ANYARR_OK;
         }
-        if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
-            slot->value = value;
-            return ANYARR_OK;
-        }
-        if (slot->state == MAP_SLOT_DELETED && dead_index == SIZE_MAX) {
-            dead_index = index;
+        if (slot->psl < current_psl) {
+            char *tk = slot->key;
+            slot->key = current_key;
+            current_key  = tk;
+            ANY_NAMESPACE tv = slot->value;
+            slot->value = current_val;
+            current_val = tv;
+            int32_t tp = slot->psl;
+            slot->psl = current_psl;
+            current_psl  = tp;
         }
         index = (index + 1) % m->capacity;
+        current_psl++;
     }
 }
 
@@ -829,49 +845,50 @@ static inline anyarr_result map_resize(HashMap *m) {
     }
     MapEntry *old_entries = m->entries;
     const size_t old_capacity = m->capacity;
-    m->capacity = old_capacity << 1;
-    if (arena_alloc(anyarr_arena, m->capacity * sizeof(MapEntry), (void **) &m->entries) != ANYARR_OK) {
-        m->entries = old_entries;
-        m->capacity = old_capacity;
+    const size_t new_capacity = old_capacity << 1;
+    MapEntry *new_entries;
+    if (arena_alloc(anyarr_arena, new_capacity * sizeof(MapEntry), (void **) &new_entries) != ANYARR_OK) {
         return ANYARR_ERR_OOM;
     }
-    memset(m->entries, 0, m->capacity * sizeof(MapEntry));
-    m->deleted_count = 0;
+    for (size_t i = 0; i < new_capacity; i++) {
+        new_entries[i].psl = -1;
+    }
+    m->entries = new_entries;
+    m->capacity = new_capacity;
+    m->size = 0;
     for (size_t i = 0; i < old_capacity; i++) {
-        if (old_entries[i].state == MAP_SLOT_OCCUPIED) {
-            const uint64_t hash = map_hash(old_entries[i].key);
-            size_t index = hash % m->capacity;
-            while (m->entries[index].state != MAP_SLOT_EMPTY) {
-                index = (index + 1) % m->capacity;
+        if (old_entries[i].psl < 0) {
+            continue;
+        }
+        char *current_key = old_entries[i].key;
+        ANY_NAMESPACE current_val = old_entries[i].value;
+        int32_t current_psl = 0;
+        size_t index = map_hash(current_key) % m->capacity;
+        while (1) {
+            MapEntry *slot = &m->entries[index];
+            if (slot->psl < 0) {
+                slot->key = current_key;
+                slot->value = current_val;
+                slot->psl = current_psl;
+                m->size++;
+                break;
             }
-            m->entries[index].key = old_entries[i].key;
-            m->entries[index].value = old_entries[i].value;
-            m->entries[index].state = MAP_SLOT_OCCUPIED;
+            if (slot->psl < current_psl) {
+                char *tk = slot->key;
+                slot->key = current_key;
+                current_key = tk;
+                ANY_NAMESPACE tv = slot->value;
+                slot->value = current_val;
+                current_val = tv;
+                int32_t tp = slot->psl;
+                slot->psl = current_psl;
+                current_psl = tp;
+            }
+            index = (index + 1) % m->capacity;
+            current_psl++;
         }
     }
     return ANYARR_OK;
-}
-
-
-static inline anyarr_result map_get(HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
-    if (m == NULL || m->entries == NULL || key == NULL) {
-        return ANYARR_ERR_NULLPTR;
-    }
-    const uint64_t hash = map_hash(key);
-    size_t index = hash % m->capacity;
-    const size_t start = index;
-    do {
-        MapEntry *slot = &m->entries[index];
-        if (slot->state == MAP_SLOT_EMPTY) {
-            return ANYARR_ERR_EMPTY;
-        }
-        if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
-            *out_value = &slot->value;
-            return ANYARR_OK;
-        }
-        index = (index + 1) % m->capacity;
-    } while (index != start);
-    return ANYARR_ERR_EMPTY;
 }
 
 
@@ -879,23 +896,33 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return ANYARR_ERR_NULLPTR;
     }
-    const uint64_t hash = map_hash(key);
-    size_t index = hash % m->capacity;
-    const size_t start = index;
-    do {
+    size_t index = map_hash(key) % m->capacity;
+    int32_t psl = 0;
+    while (1) {
         MapEntry *slot = &m->entries[index];
-        if (slot->state == MAP_SLOT_EMPTY) {
+        if (slot->psl < 0 || slot->psl < psl) {
+            return ANYARR_ERR_OUT_OF_BOUNDS;
+        }
+        if (strcmp(slot->key, key) == 0) {
             break;
         }
-        if (slot->state == MAP_SLOT_OCCUPIED && strcmp(slot->key, key) == 0) {
-            slot->state = MAP_SLOT_DELETED;
-            m->size--;
-            m->deleted_count++;
-            return ANYARR_OK;
-        }
         index = (index + 1) % m->capacity;
-    } while (index != start);
-    return ANYARR_ERR_OUT_OF_BOUNDS;
+        psl++;
+    }
+    while (1) {
+        size_t next = (index + 1) % m->capacity;
+        MapEntry *succ = &m->entries[next];
+        if (succ->psl <= 0) {
+            break;
+        }
+        m->entries[index] = *succ;
+        m->entries[index].psl -= 1;
+        index = next;
+    }
+    m->entries[index].psl = -1;
+    m->entries[index].key = NULL;
+    m->size--;
+    return ANYARR_OK;
 }
 
 
@@ -1116,7 +1143,7 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
                 return ANYARR_ERR_OOM;
             }
             for (size_t i = 0; i < src_map->capacity; i++) {
-                if (src_map->entries[i].state != MAP_SLOT_OCCUPIED) {
+                if (src_map->entries[i].psl < 0) {
                     continue;
                 }
                 ANY_NAMESPACE cloned_val;
@@ -1226,7 +1253,7 @@ static inline anyarr_result any_equal(ANY_NAMESPACE *a, ANY_NAMESPACE *b) {
                 return ANYARR_NOT_EQUAL;
             }
             for (size_t i = 0; i < ma->capacity; i++) {
-                if (ma->entries[i].state != MAP_SLOT_OCCUPIED) {
+                if (ma->entries[i].psl < 0) {
                     continue;
                 }
                 ANY_NAMESPACE *val_b;
@@ -1272,6 +1299,154 @@ static inline const ANY_NAMESPACE *array_at(const DynamicArray *buf, size_t idx)
         return NULL;
     }
     return &buf->data[idx];
+}
+
+
+#ifndef ANYARR_WALKER_DEPTH
+#   define ANYARR_WALKER_DEPTH 16
+#endif
+
+#ifndef ANYARR_PREFETCH_DISTANCE
+#   define ANYARR_PREFETCH_DISTANCE 4
+#endif
+
+_Static_assert(ANYARR_WALKER_DEPTH >= 1,
+               "ANYARR_WALKER_DEPTH must be at least 1");
+_Static_assert(ANYARR_PREFETCH_DISTANCE >= 0,
+               "ANYARR_PREFETCH_DISTANCE must be non-negative");
+
+#define WALK_SHALLOW 1
+#define WALK_DEEP    0
+
+typedef struct {
+    uint8_t type;
+    size_t index;
+    size_t bound;
+    ANY_NAMESPACE *data;
+    MapEntry *entries;
+    const char *last_key;
+} AnyIter;
+
+
+static inline AnyIter any_iter(ANY_NAMESPACE *root) {
+    AnyIter it = {0};
+    if (root == NULL) {
+        return it;
+    }
+    if (root->type == TYPE_ARRAY) {
+        it.type = TYPE_ARRAY;
+        it.data = root->data.a->data;
+        it.bound = root->data.a->size;
+    } else if (root->type == TYPE_MAP) {
+        it.type = TYPE_MAP;
+        it.entries = root->data.m->entries;
+        it.bound = root->data.m->capacity;
+    }
+    return it;
+}
+
+
+static inline ANY_NAMESPACE *any_iter_next(AnyIter *it) {
+    if (it == NULL) {
+        return NULL;
+    }
+    if (it->type == TYPE_ARRAY) {
+        if (it->index >= it->bound) {
+            return NULL;
+        }
+#if defined(__GNUC__) || defined(__clang__)
+        if (it->index + ANYARR_PREFETCH_DISTANCE < it->bound) {
+            __builtin_prefetch(&it->data[it->index + ANYARR_PREFETCH_DISTANCE], 0, 1);
+        }
+#endif
+        return &it->data[it->index++];
+    }
+    if (it->type == TYPE_MAP) {
+        while (it->index < it->bound) {
+            MapEntry *slot = &it->entries[it->index++];
+#if defined(__GNUC__) || defined(__clang__)
+            if (it->index + ANYARR_PREFETCH_DISTANCE < it->bound) {
+                __builtin_prefetch(&it->entries[it->index + ANYARR_PREFETCH_DISTANCE], 0, 1);
+            }
+#endif
+            if (slot->psl < 0) {
+                continue;
+            }
+            it->last_key = slot->key;
+            return &slot->value;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+
+typedef struct {
+    AnyIter stack[ANYARR_WALKER_DEPTH];
+    int depth;
+    int max_depth;
+    anyarr_result result;
+} AnyWalker;
+
+
+static inline AnyWalker any_walker(ANY_NAMESPACE *root, const int max_depth) {
+    AnyWalker walk = {0};
+    walk.depth = -1;
+    walk.max_depth = max_depth;
+    if (root == NULL) {
+        walk.result = ANYARR_ERR_NULLPTR;
+        return walk;
+    }
+    if (root->type != TYPE_ARRAY && root->type != TYPE_MAP) {
+        walk.result = ANYARR_ERR_TYPE_MISMATCH;
+        return walk;
+    }
+    walk.stack[0] = any_iter(root);
+    walk.depth = 0;
+    walk.result = ANYARR_OK;
+    return walk;
+}
+
+
+static inline const char *any_walker_key(const AnyWalker *walk) {
+    if (walk == NULL || walk->depth < 0 || walk->result != ANYARR_OK) {
+        return NULL;
+    }
+    return walk->stack[walk->depth].last_key;
+}
+
+
+static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
+    if (walk == NULL || walk->depth < 0 || walk->result != ANYARR_OK) {
+        return NULL;
+    }
+    while (walk->depth >= 0) {
+        ANY_NAMESPACE *val = any_iter_next(&walk->stack[walk->depth]);
+        if (val == NULL) {
+            walk->depth--;
+            continue;
+        }
+#if defined(__GNUC__) || defined(__clang__)
+        _Bool is_container = __builtin_expect(val->type == TYPE_ARRAY || val->type == TYPE_MAP, 0);
+#else
+        _Bool is_container = (val->type == TYPE_ARRAY || val->type == TYPE_MAP);
+#endif
+        if (!is_container) {
+            return val;
+        }
+        int next_depth = walk->depth + 1;
+        _Bool at_limit = (walk->max_depth != WALK_DEEP) && (next_depth >= walk->max_depth);
+        if (at_limit) {
+            return val;
+        }
+        if (next_depth >= ANYARR_WALKER_DEPTH) {
+            walk->result = ANYARR_ERR_OUT_OF_BOUNDS;
+            return NULL;
+        }
+        walk->stack[next_depth] = any_iter(val);
+        walk->depth = next_depth;
+    }
+    return NULL;
 }
 
 
