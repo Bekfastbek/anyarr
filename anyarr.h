@@ -19,7 +19,7 @@
  * Maybe looking into thread safety
  * Synthetic benchmarks compared to other libraries in AWS
  */
-#   pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-function"
 
 #if defined(_WIN32) || defined(_WIN64)
 #   define ANYARR_PLATFORM_WINDOWS
@@ -432,6 +432,7 @@ static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
     if (a == NULL) {
         DynamicArray *heap_arr;
         arena_alloc(anyarr_arena, sizeof(DynamicArray), (void **) &heap_arr);
+        array_init(heap_arr);
         return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = heap_arr};
     }
     return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = a};
@@ -518,6 +519,9 @@ static inline anyarr_result any_get_double(const ANY_NAMESPACE *val, double *out
 
 
 static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char **out_value) {
+    if (val == NULL || out_value == NULL) {
+        return handle_error(ANYARR_ERR_NULLPTR);
+    }
     if (val->type == TYPE_STRING) {
         *out_value = val->data.s;
         return ANYARR_OK;
@@ -530,6 +534,9 @@ static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char 
 
 
 static inline anyarr_result any_get_blob(const ANY_NAMESPACE *val, Blob *out_value) {
+    if (val == NULL || out_value == NULL) {
+        return handle_error(ANYARR_ERR_NULLPTR);
+    }
     if (val->type == TYPE_BLOB) {
         out_value->ptr = val->data.l->ptr;
         out_value->size = val->data.l->size;
