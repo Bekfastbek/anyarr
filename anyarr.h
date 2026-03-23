@@ -9,16 +9,18 @@
 
 #ifndef ANYARR_H
 #define ANYARR_H
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /*TO DO:
- * SIMD Improvements: HashMap, any_equal, arena_restore
- * Maybe looking into thread safety
- * Synthetic benchmarks compared to other libraries in AWS
+ * SIMD: x86 AVX512 and ARM64 NEON (Apple doesn't support SVE)
+ * SIMD Improvements: HashMap (SoA layout for PSL scanning), any_equal, arena_restore
+ * NumArray: typed SIMD array (double), Int64Array (int64_t exact integers)
+ * ANYARR_THREADED toggle: _Thread_local arenas, fully isolated per thread
  */
+
 #pragma GCC diagnostic ignored "-Wunused-function"
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -85,7 +87,7 @@ enum Type {
 };
 
 
-static inline anyarr_result handle_error(anyarr_result error_code) {
+static inline anyarr_result handle_error(const anyarr_result error_code) {
     switch (error_code) {
         case ANYARR_ERR_OOM:
             fprintf(stderr, "[ANYARR] Out of Memory. Exiting...\n");
@@ -360,7 +362,7 @@ static inline ANY_NAMESPACE assign_char(const char c) {
 }
 
 
-static inline ANY_NAMESPACE assign_int(const int64_t i) {
+static inline ANY_NAMESPACE assign_int_(const int64_t i) {
     return (ANY_NAMESPACE){TYPE_INT, .data.i = i};
 }
 
@@ -802,8 +804,7 @@ static inline anyarr_result array_append(DynamicArray *buf, const ANY_NAMESPACE 
         }
         const size_t old_bytes = arena_align_up(buf->capacity * sizeof(ANY_NAMESPACE));
         const size_t new_bytes = arena_align_up(new_capacity * sizeof(ANY_NAMESPACE));
-        const _Bool at_tip = (buf->data != NULL) && (
-                                 (uint8_t *) buf->data + old_bytes == anyarr_arena->base + anyarr_arena->used);
+        const _Bool at_tip = (buf->data != NULL) && ((uint8_t *) buf->data + old_bytes == anyarr_arena->base + anyarr_arena->used);
         if (at_tip) {
             const size_t extra = new_bytes - old_bytes;
             const size_t new_used = anyarr_arena->used + extra;
@@ -1318,11 +1319,11 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
 #define assign_any(x) _Generic((x), \
     _Bool: assign_bool,             \
     char: assign_char,              \
-    signed char: assign_int,        \
-    short: assign_int,              \
-    int: assign_int,                \
-    long: assign_int,               \
-    long long: assign_int,          \
+    signed char: assign_int_,       \
+    short: assign_int_,             \
+    int: assign_int_,               \
+    long: assign_int_,              \
+    long long: assign_int_,         \
     unsigned char: assign_uint,     \
     unsigned short: assign_uint,    \
     unsigned int: assign_uint,      \
