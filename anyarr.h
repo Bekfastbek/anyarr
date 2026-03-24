@@ -17,8 +17,9 @@
 /*TO DO:
  * SIMD: x86 AVX512 and ARM64 NEON (Apple doesn't support SVE)
  * SIMD Improvements: HashMap (SoA layout for PSL scanning), any_equal, arena_restore
- * NumArray: typed SIMD array (double), Int64Array (int64_t exact integers)
- * ANYARR_THREADED toggle: _Thread_local arenas, fully isolated per thread
+ * NumArray: typed SIMD array (double), Int64Array (int64_t exact integers) but the priority is the double array and let it also convert integers into double
+ * _Thread_local arenas with a thread pool
+ * Checking for code safety or something idk safety is overrated footgun is fun
  */
 
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -57,12 +58,29 @@
 #   define ANY_NAMESPACE Any
 #endif
 
+#ifndef ANYARR_WALKER_DEPTH
+#   define ANYARR_WALKER_DEPTH 16
+#endif
+
+#ifndef ANYARR_PREFETCH_DISTANCE
+#   define ANYARR_PREFETCH_DISTANCE 4
+#endif
+
+_Static_assert(ANYARR_WALKER_DEPTH >= 1,
+               "ANYARR_WALKER_DEPTH must be at least 1");
+_Static_assert(ANYARR_PREFETCH_DISTANCE >= 0,
+               "ANYARR_PREFETCH_DISTANCE must be non-negative");
+
+#define WALK_SHALLOW 1
+#define WALK_DEEP    0
+
+
 typedef enum {
     ANYARR_OK = 0,
     ANYARR_EQUAL = 1,
     ANYARR_NOT_EQUAL = 2,
+    // These would be also assuming the type of TYPE_INT when casting to ANY_NAMESPACE so this is better
     ANYARR_ERR_OOM = 0xF0,
-    // They would be also assuming the type of TYPE_INT when casting to ANY_NAMESPACE so this is better
     ANYARR_ERR_NULLPTR = 0xF1,
     ANYARR_ERR_OUT_OF_BOUNDS = 0xF2,
     ANYARR_ERR_EMPTY = 0xF3,
@@ -81,7 +99,7 @@ enum Type {
     TYPE_STRING_SMALL,
     TYPE_BLOB,
     TYPE_BLOB_SMALL,
-    TYPE_PTR,
+    TYPE_PTR, // Not supporting a footgun so the ownership is on your hands not arena and only providing clone and comparison safely
     TYPE_ARRAY,
     TYPE_MAP
 };
@@ -246,7 +264,6 @@ static inline void arena_restore(ARENA_NAMESPACE *a, const size_t saved) {
     if (saved >= a->used) {
         return;
     }
-    memset(a->base + saved, 0, a->used - saved);
     a->used = saved;
 }
 
@@ -346,6 +363,15 @@ struct Blob {
     size_t size;
 };
 
+typedef struct {
+    uint8_t type;
+    size_t index;
+    size_t bound;
+    ANY_NAMESPACE *data;
+    MapEntry *entries;
+    const char *last_key;
+} AnyIter;
+
 
 static inline ANY_NAMESPACE assign_null(void) {
     return (ANY_NAMESPACE){TYPE_NULL};
@@ -362,7 +388,7 @@ static inline ANY_NAMESPACE assign_char(const char c) {
 }
 
 
-static inline ANY_NAMESPACE assign_int_(const int64_t i) {
+static inline ANY_NAMESPACE assign_int_(const int64_t i) {  // Internal until number arrays are made
     return (ANY_NAMESPACE){TYPE_INT, .data.i = i};
 }
 
@@ -585,6 +611,124 @@ static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap **out_
 }
 
 
+static inline AnyIter any_iter(const ANY_NAMESPACE *root);
+static inline ANY_NAMESPACE *any_iter_next(AnyIter *it);
+
+static inline anyarr_result any_print(const ANY_NAMESPACE *val, int depth) {
+    #define INDENT() for (int _i = 0; _i < depth; _i++) printf("  ")
+
+    switch (val->type) {
+        case TYPE_NULL:
+            INDENT();
+            printf("null\n");
+            return ANYARR_OK;
+
+        case TYPE_BOOL:
+            INDENT();
+            if (val->data.b) {
+                printf("bool: true\n");
+            } else {
+                printf("bool: false\n");
+            }
+            return ANYARR_OK;
+
+        case TYPE_CHAR:
+            INDENT();
+            printf("char: %c\n", val->data.c);
+            return ANYARR_OK;
+
+        case TYPE_INT:
+            INDENT();
+            printf("int64_t: %lld\n", val->data.i);
+            return ANYARR_OK;
+
+        case TYPE_UINT:
+            INDENT();
+            printf("uint64_t: %llu\n", val->data.u);
+            return ANYARR_OK;
+
+        case TYPE_FLOAT:
+            INDENT();
+            printf("float: %f\n", val->data.f);
+            return ANYARR_OK;
+
+        case TYPE_DOUBLE:
+            INDENT();
+            printf("double: %lf\n", val->data.d);
+            return ANYARR_OK;
+
+        case TYPE_STRING:
+            INDENT();
+            printf("string(heap): \"%s\"\n", val->data.s);
+            return ANYARR_OK;
+
+        case TYPE_STRING_SMALL:
+            INDENT();
+            printf("string(sso): \"%s\"\n", val->small_buf);
+            return ANYARR_OK;
+
+        case TYPE_BLOB: {
+            INDENT();
+            printf("blob(heap, %zu bytes): [ ", val->data.l->size);
+            for (size_t i = 0; i < val->data.l->size; i++) {
+                printf("%02x ", val->data.l->ptr[i]);
+            }
+            printf("]\n");
+            return ANYARR_OK;
+        }
+
+        case TYPE_BLOB_SMALL: {
+            INDENT();
+            printf("blob(sbo, %u bytes): [ ", val->len);
+            for (size_t i = 0; i < val->len; i++) {
+                printf("%02x ", val->small_blob[i]);
+            }
+            printf("]\n");
+            return ANYARR_OK;
+        }
+
+        case TYPE_PTR:
+            INDENT();
+            printf("ptr: %p\n", val->data.p);
+            return ANYARR_OK;
+
+        case TYPE_ARRAY: {
+            INDENT();
+            printf("[\n");
+            AnyIter it = any_iter(val);
+            ANY_NAMESPACE *item;
+            while ((item = any_iter_next(&it))) {
+                any_print(item, depth + 1);
+            }
+            INDENT();
+            printf("]\n");
+            return ANYARR_OK;
+        }
+
+        case TYPE_MAP: {
+            INDENT();
+            printf("{\n");
+            AnyIter it = any_iter(val);
+            ANY_NAMESPACE *item;
+            while ((item = any_iter_next(&it))) {
+                for (int _i = 0; _i < depth + 1; _i++) {
+                    printf("  ");
+                }
+                printf("%s:\n", it.last_key);
+                any_print(item, depth + 2);
+            }
+            INDENT();
+            printf("}\n");
+            return ANYARR_OK;
+        }
+
+        #undef INDENT
+        default:
+            return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+    }
+}
+
+
 static inline uint64_t map_hash(const char *key) {
     uint64_t hash = 14695981039346656037ULL;
     while (*key) {
@@ -602,7 +746,6 @@ static inline anyarr_result array_init(DynamicArray *buf) {
     buf->size = 0;
     buf->capacity = 4;
     arena_alloc(anyarr_arena, buf->capacity * sizeof(ANY_NAMESPACE), (void **) &buf->data);
-    memset(buf->data, 0, buf->capacity * sizeof(ANY_NAMESPACE));
     return ANYARR_OK;
 }
 
@@ -814,18 +957,14 @@ static inline anyarr_result array_append(DynamicArray *buf, const ANY_NAMESPACE 
             if (new_used > anyarr_arena->committed) {
                 arena_commit(anyarr_arena, new_used - anyarr_arena->committed);
             }
-            memset((uint8_t *) buf->data + buf->capacity * sizeof(ANY_NAMESPACE),
-                   0,
-                   (new_capacity - buf->capacity) * sizeof(ANY_NAMESPACE));
             anyarr_arena->used = new_used;
             buf->capacity = new_capacity;
         } else {
             ANY_NAMESPACE *temp;
             arena_alloc(anyarr_arena, new_capacity * sizeof(ANY_NAMESPACE), (void **) &temp);
-            if (buf->size > 0 && buf->data != NULL) {
+            if (buf->size > 0) {
                 memcpy(temp, buf->data, buf->size * sizeof(ANY_NAMESPACE));
             }
-            memset(temp + buf->size, 0, (new_capacity - buf->size) * sizeof(ANY_NAMESPACE));
             buf->data = temp;
             buf->capacity = new_capacity;
         }
@@ -847,7 +986,6 @@ static inline anyarr_result array_remove_index(DynamicArray *buf, const size_t i
         memmove(&buf->data[index], &buf->data[index + 1], index_queue * sizeof(ANY_NAMESPACE));
     }
     buf->size--;
-    memset(&buf->data[buf->size], 0, sizeof(ANY_NAMESPACE));
     return ANYARR_OK;
 }
 
@@ -883,7 +1021,7 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
     }
     ANY_NAMESPACE *current = root;
     const char *p = path;
-    char segment[256];
+    char segment[256];  // Not worth making it arena allocated
     while (*p != '\0') {
         while (*p == '.' || *p == '[' || *p == ']') {
             p++;
@@ -1131,7 +1269,6 @@ static inline anyarr_result array_pop(DynamicArray *buf) {
         return handle_error(ANYARR_ERR_EMPTY);
     }
     buf->size--;
-    memset(&buf->data[buf->size], 0, sizeof(ANY_NAMESPACE));
     return ANYARR_OK;
 }
 
@@ -1158,32 +1295,6 @@ static inline const ANY_NAMESPACE *array_at(const DynamicArray *buf, size_t idx)
 }
 
 
-#ifndef ANYARR_WALKER_DEPTH
-#   define ANYARR_WALKER_DEPTH 16
-#endif
-
-#ifndef ANYARR_PREFETCH_DISTANCE
-#   define ANYARR_PREFETCH_DISTANCE 4
-#endif
-
-_Static_assert(ANYARR_WALKER_DEPTH >= 1,
-               "ANYARR_WALKER_DEPTH must be at least 1");
-_Static_assert(ANYARR_PREFETCH_DISTANCE >= 0,
-               "ANYARR_PREFETCH_DISTANCE must be non-negative");
-
-#define WALK_SHALLOW 1
-#define WALK_DEEP    0
-
-typedef struct {
-    uint8_t type;
-    size_t index;
-    size_t bound;
-    ANY_NAMESPACE *data;
-    MapEntry *entries;
-    const char *last_key;
-} AnyIter;
-
-
 static inline AnyIter any_iter(const ANY_NAMESPACE *root) {
     AnyIter it = {0};
     if (root == NULL) {
@@ -1203,25 +1314,16 @@ static inline AnyIter any_iter(const ANY_NAMESPACE *root) {
 
 
 static inline ANY_NAMESPACE *any_iter_next(AnyIter *it) {
-    if (it == NULL) {
-        handle_error(ANYARR_ERR_NULLPTR);
+    if (it->type == TYPE_ARRAY) {
+        if (it->index < it->bound) {
+            return &it->data[it->index++];
+        }
         return NULL;
     }
-    if (it->type == TYPE_ARRAY) {
-        if (it->index >= it->bound) {
-            return NULL;
-        }
-        if (it->index + ANYARR_PREFETCH_DISTANCE < it->bound) {
-            __builtin_prefetch(&it->data[it->index + ANYARR_PREFETCH_DISTANCE], 0, 1);
-        }
-        return &it->data[it->index++];
-    }
+
     if (it->type == TYPE_MAP) {
         while (it->index < it->bound) {
             MapEntry *slot = &it->entries[it->index++];
-            if (it->index + ANYARR_PREFETCH_DISTANCE < it->bound) {
-                __builtin_prefetch(&it->entries[it->index + ANYARR_PREFETCH_DISTANCE], 0, 1);
-            }
             if (slot->psl < 0) {
                 continue;
             }
@@ -1230,6 +1332,7 @@ static inline ANY_NAMESPACE *any_iter_next(AnyIter *it) {
         }
         return NULL;
     }
+
     return NULL;
 }
 
