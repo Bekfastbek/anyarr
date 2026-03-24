@@ -1,0 +1,7 @@
+[book]
+title = "anyarr"
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
