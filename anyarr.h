@@ -637,7 +637,7 @@ static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap **out_
 static inline AnyIter any_iter(const ANY_NAMESPACE *root);
 static inline ANY_NAMESPACE *any_iter_next(AnyIter *it);
 
-static inline anyarr_result any_print(const ANY_NAMESPACE *val, int depth) {
+static inline anyarr_result any_print(const ANY_NAMESPACE *val, const int depth) {
     #define INDENT() for (int _i = 0; _i < depth; _i++) printf("  ")
 
     switch (val->type) {
@@ -890,7 +890,7 @@ static inline anyarr_result map_get_silent(const HashMap *m, const char *key, AN
 }
 
 
-static inline anyarr_result map_put(HashMap *m, const char *key, const ANY_NAMESPACE value) {
+static inline anyarr_result map_put_impl(HashMap *m, const char *key, const ANY_NAMESPACE value) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -933,6 +933,7 @@ static inline anyarr_result map_put(HashMap *m, const char *key, const ANY_NAMES
         current_psl++;
     }
 }
+#define map_put(m, key, value) map_put_impl(m, key, assign_any(value))
 
 
 static inline anyarr_result map_resize(HashMap *m) {
@@ -1017,7 +1018,7 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
 }
 
 
-static inline anyarr_result array_append(DynamicArray *buf, const ANY_NAMESPACE value) {
+static inline anyarr_result array_append_impl(DynamicArray *buf, const ANY_NAMESPACE value) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1053,6 +1054,7 @@ static inline anyarr_result array_append(DynamicArray *buf, const ANY_NAMESPACE 
     buf->data[buf->size++] = value;
     return ANYARR_OK;
 }
+#define array_append(buf, value) array_append_impl(buf, assign_any(value))
 
 
 static inline anyarr_result array_remove_index(DynamicArray *buf, const size_t index) {
@@ -1071,7 +1073,7 @@ static inline anyarr_result array_remove_index(DynamicArray *buf, const size_t i
 }
 
 
-static inline anyarr_result array_set_index(const DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
+static inline anyarr_result array_set_index_impl(const DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1081,6 +1083,7 @@ static inline anyarr_result array_set_index(const DynamicArray *buf, const size_
     buf->data[index] = value;
     return ANYARR_OK;
 }
+#define array_set_index(buf, value) array_set_index_impl(buf, index, assign_any(value))
 
 
 static inline anyarr_result array_get(const DynamicArray *buf, const size_t index, ANY_NAMESPACE **out_value) {
@@ -1142,7 +1145,7 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
 }
 
 
-static inline anyarr_result array_reserve(DynamicArray *buf, size_t new_capacity) {
+static inline anyarr_result array_reserve(DynamicArray *buf, const size_t new_capacity) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1190,7 +1193,7 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
                 if (res != ANYARR_OK) {
                     return res;
                 }
-                array_append(new_arr, cloned_elem);
+                array_append_impl(new_arr, cloned_elem);
             }
             *dest = assign_array(new_arr);
             return ANYARR_OK;
@@ -1218,7 +1221,7 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
                 if (res != ANYARR_OK) {
                     return res;
                 }
-                map_put(new_map, src_map->entries[i].key, cloned_val);
+                map_put_impl(new_map, src_map->entries[i].key, cloned_val);
             }
             *dest = assign_map(new_map);
             return ANYARR_OK;

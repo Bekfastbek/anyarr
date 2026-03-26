@@ -14,12 +14,12 @@ get_any(&val, &out); // *out will have the returning datatype since you cannot d
 HashMap Map;
 map_init(&Map);
 assign_map(&Map);
-map_put(&Map, "Active", assign_any((_Bool)1));
+map_put(&Map, "Active", true);
 DynamicArray Array;
 array_init(&Array);
 const Any val = assign_array(&Array);
-array_append(&Array, assign_any("bek"));
-array_append(&Array, assign_any(&Map));
+array_append(&Array, "bek");
+array_append(&Array, &Map);
 any_print(&val, 0);
 ```
 
