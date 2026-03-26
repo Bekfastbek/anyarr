@@ -45,8 +45,8 @@ assign_any(&player);
 DynamicArray Array;
 array_init(&Array);
 Any wrapper = assign_array(&Array);
-array_append(&Array, assign_any(20)); // Stores an integer
-array_append(&Array, assign_any("String")); // Stores a small string
+array_append(&Array, 20); // Stores an integer
+array_append(&Array, "String"); // Stores a small string
 ```
 
 **Hashmaps:** Wraps a HashMap into an Any value. The map can still be used directly through its pointer for insertion and lookup.
@@ -55,6 +55,6 @@ array_append(&Array, assign_any("String")); // Stores a small string
 HashMap Map;
 map_init(&Map);
 Any wrapper = assign_map(&Map);
-map_put(&Map, "Key", assign_any("Value"));
-map_put(&Map, "Key1", assign_any(20));
+map_put(&Map, "Key", "Value");
+map_put(&Map, "Key1", 20);
 ```
