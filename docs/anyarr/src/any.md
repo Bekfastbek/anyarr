@@ -28,7 +28,7 @@ Byte:  0        1                    15
 - Char
 - Int (signed char, short, int, long, long long -> int64_t)
 - UInt (unsigned char, st, long, long long -> uint64_t)
-- Floathort, in
+- Float
 - Double
 - Strings (Arena allocated String Buffer)
 - Small Strings (SSO 14 elements + 1 null terminator)

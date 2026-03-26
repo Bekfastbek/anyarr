@@ -13,13 +13,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+// The true/false values in stdbool get converted into int types so the hacky solution I thought is to undef and explicitly define true/false as (_Bool) types so assign_any doesn't confuse them with int
+#ifndef bool
+#define bool _Bool
+#endif
+#undef true
+#undef false
+#define true  ((_Bool)1)
+#define false ((_Bool)0)
 
 /*TO DO:
  * SIMD: x86 AVX512 and ARM64 NEON (Apple doesn't support SVE)
  * SIMD Improvements: HashMap (SoA layout for PSL scanning), any_equal, arena_restore
  * NumArray: typed SIMD array (double), Int64Array (int64_t exact integers) but the priority is the double array and let it also convert integers into double
  * _Thread_local arenas with a thread pool
- * Checking for code safety or something idk safety is overrated footgun is fun
  */
 
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -66,11 +74,6 @@
 #   define ANYARR_PREFETCH_DISTANCE 4
 #endif
 
-_Static_assert(ANYARR_WALKER_DEPTH >= 1,
-               "ANYARR_WALKER_DEPTH must be at least 1");
-_Static_assert(ANYARR_PREFETCH_DISTANCE >= 0,
-               "ANYARR_PREFETCH_DISTANCE must be non-negative");
-
 #define WALK_SHALLOW 1
 #define WALK_DEEP    0
 
@@ -99,7 +102,7 @@ enum Type {
     TYPE_STRING_SMALL,
     TYPE_BLOB,
     TYPE_BLOB_SMALL,
-    TYPE_PTR, // Not supporting a footgun so the ownership is on your hands not arena and only providing clone and comparison safely
+    TYPE_PTR, // Not supporting a footgun so the ownership is on your hands not arena and only providing clone and comparison safely with any_print only providing pointer address, but I was thinking of supporting void* to be stored in Arena in the future
     TYPE_ARRAY,
     TYPE_MAP
 };
@@ -128,12 +131,13 @@ static inline anyarr_result handle_error(const anyarr_result error_code) {
     return error_code;
 }
 
-
+// This is very fast because it's just pointer bumps for alloc/dealloc
 typedef struct {
     uint8_t *base;
     size_t used;
     size_t committed;
     size_t reserved;
+    uint64_t hash_seed;
 } ARENA_NAMESPACE;
 
 #ifdef ANYARR_IMPLEMENTATION
@@ -144,12 +148,30 @@ extern ARENA_NAMESPACE anyarr_arena_instance;
 extern ARENA_NAMESPACE *anyarr_arena;
 #endif
 
+
+static inline uint64_t make_seed(void) {
+    uint64_t seed = 0;
+#ifdef ANYARR_PLATFORM_WINDOWS // Spent WAY TOO LONG figuring out how to get random number without BCrypt but here is reference: https://github.com/jedisct1/libsodium/blob/master/src/libsodium/randombytes/sysrandom/randombytes_sysrandom.c
+#define RtlGenRandom SystemFunction036
+    BOOLEAN NTAPI SystemFunction036(PVOID RandomBuffer, ULONG RandomBufferLength);
+    RtlGenRandom(&seed, sizeof(seed));
+#else
+    getentropy(&seed, sizeof(seed)); // getrandom() is not a required for this use case, it only needs to init once
+#endif
+    if (seed == 0) {
+        fprintf(stderr, "Seed failed. Aborting...");
+        abort();
+    }
+    return seed;
+}
+
+
 static inline size_t arena_align_up(size_t n) {
     return (n + 15) & ~15;
 }
 
 
-static inline anyarr_result arena_commit(ARENA_NAMESPACE *a, size_t extra) {
+static inline anyarr_result arena_commit(ARENA_NAMESPACE *a, const size_t extra) {
     size_t new_committed = (a->committed + extra + ARENA_COMMIT_CHUNK - 1) & ~(ARENA_COMMIT_CHUNK - 1);
     if (new_committed > a->reserved) {
         new_committed = a->reserved;
@@ -174,7 +196,7 @@ static inline anyarr_result arena_commit(ARENA_NAMESPACE *a, size_t extra) {
 
 static inline void auto_init(void);
 
-static inline anyarr_result arena_alloc(ARENA_NAMESPACE *a, size_t size, void **out) {
+static inline anyarr_result arena_alloc(ARENA_NAMESPACE *a, const size_t size, void **out) {
     if (__builtin_expect(anyarr_arena == NULL, 0)) {
         auto_init();
     }
@@ -288,6 +310,7 @@ static inline void auto_init(void) {
     }
     arena_init(&anyarr_arena_instance);
     anyarr_arena = &anyarr_arena_instance;
+    anyarr_arena->hash_seed = make_seed();
     atexit(auto_cleanup);
 }
 
@@ -350,7 +373,7 @@ typedef struct {
     char *key;
     ANY_NAMESPACE value;
     int32_t psl;
-} MapEntry;
+} MapEntry; // Need to change to SoA
 
 struct HashMap {
     MapEntry *entries;
@@ -730,12 +753,70 @@ static inline anyarr_result any_print(const ANY_NAMESPACE *val, int depth) {
 
 
 static inline uint64_t map_hash(const char *key) {
-    uint64_t hash = 14695981039346656037ULL;
-    while (*key) {
-        hash ^= (uint64_t) (unsigned char) (*key++);
-        hash *= 1099511628211ULL;
+    static const uint64_t WY0 = 0xa0761d6478bd642full;
+    static const uint64_t WY1 = 0xe7037ed1a0b428dbull;
+    size_t len = strlen(key);
+    const uint8_t *p = (const uint8_t *)key;
+    uint64_t seed = anyarr_arena->hash_seed;
+#ifdef __AVX512DQ__ // I am NOT writing anything besides AVX512 other's have too much boilerplate for me to care
+    __m512i seeds = _mm512_set1_epi64(seed);
+    __m512i c0 = _mm512_set1_epi64(WY0);
+    __m512i c1 = _mm512_set1_epi64(WY1);
+    for (; len >= 64; len -= 64, p += 64) {
+        __m512i chunk = _mm512_loadu_si512(p);
+        __m512i a = _mm512_xor_si512(chunk, c0);
+        __m512i b = _mm512_xor_si512(seeds, c1);
+        __m512i mul_64 = _mm512_mullo_epi64(a, b);
+        seeds = _mm512_xor_si512(seeds, mul_64);
     }
-    return hash;
+    if (len > 0) {
+        __mmask64 tail_mask = (1ULL << len) - 1;
+        __m512i tail = _mm512_maskz_loadu_epi8(tail_mask, p);
+        __m512i hi = _mm512_srli_epi64(tail, 32);
+        __m512i a = _mm512_xor_si512(tail, c0);
+        __m512i b = _mm512_xor_si512(seeds, c1);
+        __m512i mul_64 = _mm512_mullo_epi64(a, b);
+        seeds = _mm512_xor_si512(seeds, mul_64);
+    }
+    seed = _mm512_reduce_xor_epi64(seeds);
+#else
+    for (; len >= 8; len -= 8, p += 8) {
+        uint64_t a = 0, b = 0;
+        memcpy(&a, p, 4);
+        memcpy(&b, p + 4, 4);
+        __uint128_t m = (__uint128_t)(a ^ WY0) * (b ^ WY1);
+        seed ^= (uint64_t)(m) ^ (uint64_t)(m >> 64);
+    }
+    uint64_t a = 0, b = 0;
+    switch (len) {
+        case 7:
+            b  = (uint64_t)p[6] << 32;
+        case 6:
+            b |= (uint64_t)p[5] << 16;
+        case 5:
+            b |= (uint64_t)p[4] <<  8;
+        case 4:
+            memcpy(&a, p, 4);
+            break;
+        case 3:
+            a  = (uint64_t)p[2] << 16;
+        case 2:
+            a |= (uint64_t)p[1] <<  8;
+        case 1:
+            a |= (uint64_t)p[0]; b = 0;
+            break;
+        case 0:
+            a = 0; b = 0;
+            break;
+        default:
+            fprintf(stderr, "[ANYARR] Unexpected case in map hashing."); // Just there to satisfy the ide complaining about missing default case
+            break;
+    }
+    const __uint128_t m = (__uint128_t)(a ^ WY0) * (b ^ WY1);
+    seed ^= (uint64_t)(m) ^ (uint64_t)(m >> 64);
+#endif
+    const __uint128_t f = (__uint128_t)(seed ^ WY0) * (seed ^ WY1);
+    return (uint64_t)(f) ^ (uint64_t)(f >> 64);
 }
 
 
@@ -771,7 +852,7 @@ static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMES
     if (m == NULL || m->entries == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
-    size_t index = map_hash(key) % m->capacity;
+    size_t index = map_hash(key) & (m->capacity - 1);
     int32_t psl = 0;
     while (1) {
         MapEntry *slot = &m->entries[index];
@@ -782,7 +863,7 @@ static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMES
             *out_value = &slot->value;
             return ANYARR_OK;
         }
-        index = (index + 1) % m->capacity;
+        index = (index + 1) & (m->capacity - 1);
         psl++;
     }
 }
@@ -792,7 +873,7 @@ static inline anyarr_result map_get_silent(const HashMap *m, const char *key, AN
     if (m == NULL || m->entries == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
-    size_t index = map_hash(key) % m->capacity;
+    size_t index = map_hash(key) & (m->capacity - 1);
     int32_t psl = 0;
     while (1) {
         MapEntry *slot = &m->entries[index];
@@ -803,7 +884,7 @@ static inline anyarr_result map_get_silent(const HashMap *m, const char *key, AN
             *out_value = &slot->value;
             return ANYARR_OK;
         }
-        index = (index + 1) % m->capacity;
+        index = (index + 1) & (m->capacity - 1);
         psl++;
     }
 }
@@ -827,7 +908,7 @@ static inline anyarr_result map_put(HashMap *m, const char *key, const ANY_NAMES
     memcpy(current_key, key, key_len + 1);
     ANY_NAMESPACE current_val = value;
     int32_t current_psl = 0;
-    size_t index = map_hash(key) % m->capacity;
+    size_t index = map_hash(key) & (m->capacity - 1);
     while (1) {
         MapEntry *slot = &m->entries[index];
         if (slot->psl < 0) {
@@ -848,7 +929,7 @@ static inline anyarr_result map_put(HashMap *m, const char *key, const ANY_NAMES
             slot->psl = current_psl;
             current_psl = tp;
         }
-        index = (index + 1) % m->capacity;
+        index = (index + 1) & (m->capacity - 1);
         current_psl++;
     }
 }
@@ -873,7 +954,7 @@ static inline anyarr_result map_resize(HashMap *m) {
         char *current_key = old_entries[i].key;
         ANY_NAMESPACE current_val = old_entries[i].value;
         int32_t current_psl = 0;
-        size_t index = map_hash(current_key) % m->capacity;
+        size_t index = map_hash(current_key) & (m->capacity - 1);
         while (1) {
             MapEntry *slot = &m->entries[index];
             if (slot->psl < 0) {
@@ -894,7 +975,7 @@ static inline anyarr_result map_resize(HashMap *m) {
                 slot->psl = current_psl;
                 current_psl = tp;
             }
-            index = (index + 1) % m->capacity;
+            index = (index + 1) & (m->capacity - 1);
             current_psl++;
         }
     }
@@ -906,7 +987,7 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
-    size_t index = map_hash(key) % m->capacity;
+    size_t index = map_hash(key) & (m->capacity - 1);
     int32_t psl = 0;
     while (1) {
         const MapEntry *slot = &m->entries[index];
@@ -916,11 +997,11 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
         if (strcmp(slot->key, key) == 0) {
             break;
         }
-        index = (index + 1) % m->capacity;
+        index = (index + 1) & (m->capacity - 1);
         psl++;
     }
     while (1) {
-        const size_t next = (index + 1) % m->capacity;
+        const size_t next = (index + 1) & (m->capacity - 1);
         const MapEntry *succ = &m->entries[next];
         if (succ->psl < 1) {
             break;
@@ -1235,8 +1316,8 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
             return ANYARR_EQUAL;
         }
         case TYPE_MAP: {
-            HashMap *ma = a->data.m;
-            HashMap *mb = b->data.m;
+            const HashMap *ma = a->data.m;
+            const HashMap *mb = b->data.m;
             if (ma->size != mb->size) {
                 return ANYARR_NOT_EQUAL;
             }
@@ -1248,7 +1329,7 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
                 if (map_get_silent(mb, ma->entries[i].key, &val_b) != ANYARR_OK) {
                     return ANYARR_NOT_EQUAL;
                 }
-                anyarr_result res = any_equal(&ma->entries[i].value, val_b);
+                const anyarr_result res = any_equal(&ma->entries[i].value, val_b);
                 if (res != ANYARR_EQUAL) {
                     return res;
                 }
