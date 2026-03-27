@@ -25,7 +25,7 @@
 
 /*TO DO:
  * SIMD: x86 AVX512 and ARM64 NEON (Apple doesn't support SVE)
- * SIMD Improvements: HashMap (SoA layout for PSL scanning), any_equal, arena_restore
+ * SIMD Improvements: HashMap_ (SoA layout for PSL scanning), any_equal, arena_restore
  * NumArray: typed SIMD array (double), Int64Array (int64_t exact integers) but the priority is the double array and let it also convert integers into double
  * _Thread_local arenas with a thread pool
  */
@@ -156,7 +156,7 @@ static inline uint64_t make_seed(void) {
     BOOLEAN NTAPI SystemFunction036(PVOID RandomBuffer, ULONG RandomBufferLength);
     RtlGenRandom(&seed, sizeof(seed));
 #else
-    getentropy(&seed, sizeof(seed)); // getrandom() is not a required for this use case, it only needs to init once
+    getentropy(&seed, sizeof(seed)); // getrandom() is not a required for this use case, it only needs to init once and the seed !>255
 #endif
     if (seed == 0) {
         fprintf(stderr, "Seed failed. Aborting...");
@@ -324,8 +324,8 @@ static inline void arena_cleanup(ARENA_NAMESPACE *ap) {
 #define ARENA_SCOPED __attribute__((cleanup(arena_cleanup))) ARENA_NAMESPACE = {0}
 
 
-typedef struct DynamicArray DynamicArray;
-typedef struct HashMap HashMap;
+typedef struct DynamicArray_ DynamicArray_;
+typedef struct HashMap_ HashMap_;
 typedef struct Blob Blob;
 
 typedef struct {
@@ -343,8 +343,8 @@ typedef struct {
                 char *s;
                 Blob *l;
                 void *p;
-                DynamicArray *a;
-                HashMap *m;
+                DynamicArray_ *a;
+                HashMap_ *m;
             } data;
         };
 
@@ -363,7 +363,7 @@ typedef struct {
     };
 } ANY_NAMESPACE;
 
-struct DynamicArray {
+struct DynamicArray_ {
     ANY_NAMESPACE *data;
     size_t size;
     size_t capacity;
@@ -373,9 +373,9 @@ typedef struct {
     char *key;
     ANY_NAMESPACE value;
     int32_t psl;
-} MapEntry; // Need to change to SoA
+} MapEntry; // Need to change to SoA so I can vectorize it for AVX
 
-struct HashMap {
+struct HashMap_ {
     MapEntry *entries;
     size_t size;
     size_t capacity;
@@ -477,12 +477,12 @@ static inline ANY_NAMESPACE assign_ptr(void *p) {
 }
 
 
-static inline anyarr_result array_init(DynamicArray *buf);
+static inline anyarr_result array_init(DynamicArray_ *buf);
 
-static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
+static inline ANY_NAMESPACE assign_array(DynamicArray_ *a) {
     if (a == NULL) {
-        DynamicArray *heap_arr;
-        arena_alloc(anyarr_arena, sizeof(DynamicArray), (void **) &heap_arr);
+        DynamicArray_ *heap_arr;
+        arena_alloc(anyarr_arena, sizeof(DynamicArray_), (void **) &heap_arr);
         array_init(heap_arr);
         return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = heap_arr};
     }
@@ -490,12 +490,12 @@ static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
 }
 
 
-static inline anyarr_result map_init(HashMap *m);
+static inline anyarr_result map_init(HashMap_ *m);
 
-static inline ANY_NAMESPACE assign_map(HashMap *m) {
+static inline ANY_NAMESPACE assign_map(HashMap_ *m) {
     if (m == NULL) {
-        HashMap *heap_map;
-        arena_alloc(anyarr_arena, sizeof(HashMap), (void **) &heap_map);
+        HashMap_ *heap_map;
+        arena_alloc(anyarr_arena, sizeof(HashMap_), (void **) &heap_map);
         map_init(heap_map);
         return (ANY_NAMESPACE){TYPE_MAP, .data.m = heap_map};
     }
@@ -612,7 +612,7 @@ static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_val
 }
 
 
-static inline anyarr_result any_get_array(const ANY_NAMESPACE *val, DynamicArray **out_value) {
+static inline anyarr_result any_get_array(const ANY_NAMESPACE *val, DynamicArray_ **out_value) {
     if (val == NULL || out_value == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     } else if (val->type != TYPE_ARRAY) {
@@ -623,7 +623,7 @@ static inline anyarr_result any_get_array(const ANY_NAMESPACE *val, DynamicArray
 }
 
 
-static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap **out_value) {
+static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap_ **out_value) {
     if (val == NULL || out_value == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     } else if (val->type != TYPE_MAP) {
@@ -637,7 +637,7 @@ static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap **out_
 static inline AnyIter any_iter(const ANY_NAMESPACE *root);
 static inline ANY_NAMESPACE *any_iter_next(AnyIter *it);
 
-static inline anyarr_result any_print(const ANY_NAMESPACE *val, const int depth) {
+static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) {
     #define INDENT() for (int _i = 0; _i < depth; _i++) printf("  ")
 
     switch (val->type) {
@@ -721,7 +721,7 @@ static inline anyarr_result any_print(const ANY_NAMESPACE *val, const int depth)
             AnyIter it = any_iter(val);
             ANY_NAMESPACE *item;
             while ((item = any_iter_next(&it))) {
-                any_print(item, depth + 1);
+                any_print_impl(item, depth + 1);
             }
             INDENT();
             printf("]\n");
@@ -738,7 +738,7 @@ static inline anyarr_result any_print(const ANY_NAMESPACE *val, const int depth)
                     printf("  ");
                 }
                 printf("%s:\n", it.last_key);
-                any_print(item, depth + 2);
+                any_print_impl(item, depth + 2);
             }
             INDENT();
             printf("}\n");
@@ -750,6 +750,13 @@ static inline anyarr_result any_print(const ANY_NAMESPACE *val, const int depth)
             return handle_error(ANYARR_ERR_TYPE_MISMATCH);
     }
 }
+static inline anyarr_result any_print_helper(ANY_NAMESPACE val) {
+    return any_print_impl(&val, 0);
+}
+#define any_print(x) _Generic((x),              \
+    ANY_NAMESPACE*: any_print_impl((x), 0),     \
+    default: any_print_helper(assign_any(x))    \
+)
 
 
 static inline uint64_t map_hash(const char *key) {
@@ -820,7 +827,7 @@ static inline uint64_t map_hash(const char *key) {
 }
 
 
-static inline anyarr_result array_init(DynamicArray *buf) {
+static inline anyarr_result array_init(DynamicArray_ *buf) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -831,7 +838,7 @@ static inline anyarr_result array_init(DynamicArray *buf) {
 }
 
 
-static inline anyarr_result map_init(HashMap *m) {
+static inline anyarr_result map_init(HashMap_ *m) {
     if (m == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -845,10 +852,10 @@ static inline anyarr_result map_init(HashMap *m) {
 }
 
 
-static inline anyarr_result map_resize(HashMap *m);
+static inline anyarr_result map_resize(HashMap_ *m);
 
 
-static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAMESPACE **out_value) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -869,7 +876,7 @@ static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMES
 }
 
 
-static inline anyarr_result map_get_silent(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, ANY_NAMESPACE **out_value) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -890,7 +897,7 @@ static inline anyarr_result map_get_silent(const HashMap *m, const char *key, AN
 }
 
 
-static inline anyarr_result map_put_impl(HashMap *m, const char *key, const ANY_NAMESPACE value) {
+static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY_NAMESPACE value) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -936,7 +943,7 @@ static inline anyarr_result map_put_impl(HashMap *m, const char *key, const ANY_
 #define map_put(m, key, value) map_put_impl(m, key, assign_any(value))
 
 
-static inline anyarr_result map_resize(HashMap *m) {
+static inline anyarr_result map_resize(HashMap_ *m) {
     const MapEntry *old_entries = m->entries;
     const size_t old_capacity = m->capacity;
     const size_t new_capacity = old_capacity << 1;
@@ -984,7 +991,7 @@ static inline anyarr_result map_resize(HashMap *m) {
 }
 
 
-static inline anyarr_result map_remove(HashMap *m, const char *key) {
+static inline anyarr_result map_remove(HashMap_ *m, const char *key) {
     if (m == NULL || m->entries == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1018,7 +1025,7 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
 }
 
 
-static inline anyarr_result array_append_impl(DynamicArray *buf, const ANY_NAMESPACE value) {
+static inline anyarr_result array_append_impl(DynamicArray_ *buf, const ANY_NAMESPACE value) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1057,7 +1064,7 @@ static inline anyarr_result array_append_impl(DynamicArray *buf, const ANY_NAMES
 #define array_append(buf, value) array_append_impl(buf, assign_any(value))
 
 
-static inline anyarr_result array_remove_index(DynamicArray *buf, const size_t index) {
+static inline anyarr_result array_remove_index(DynamicArray_ *buf, const size_t index) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1073,7 +1080,7 @@ static inline anyarr_result array_remove_index(DynamicArray *buf, const size_t i
 }
 
 
-static inline anyarr_result array_set_index_impl(const DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
+static inline anyarr_result array_set_index_impl(const DynamicArray_ *buf, const size_t index, const ANY_NAMESPACE value) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1083,10 +1090,10 @@ static inline anyarr_result array_set_index_impl(const DynamicArray *buf, const 
     buf->data[index] = value;
     return ANYARR_OK;
 }
-#define array_set_index(buf, value) array_set_index_impl(buf, index, assign_any(value))
+#define array_set_index(buf, index, value) array_set_index_impl(buf, index, assign_any(value))
 
 
-static inline anyarr_result array_get(const DynamicArray *buf, const size_t index, ANY_NAMESPACE **out_value) {
+static inline anyarr_result array_get(const DynamicArray_ *buf, const size_t index, ANY_NAMESPACE **out_value) {
     if (buf == NULL || out_value == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1145,7 +1152,7 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
 }
 
 
-static inline anyarr_result array_reserve(DynamicArray *buf, const size_t new_capacity) {
+static inline anyarr_result array_reserve(DynamicArray_ *buf, const size_t new_capacity) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1183,9 +1190,9 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
             *dest = assign_string(src->data.s);
             return ANYARR_OK;
         case TYPE_ARRAY: {
-            DynamicArray *src_arr = src->data.a;
-            DynamicArray *new_arr;
-            arena_alloc(anyarr_arena, sizeof(DynamicArray), (void **) &new_arr);
+            DynamicArray_ *src_arr = src->data.a;
+            DynamicArray_ *new_arr;
+            arena_alloc(anyarr_arena, sizeof(DynamicArray_), (void **) &new_arr);
             array_init(new_arr);
             for (size_t i = 0; i < src_arr->size; i++) {
                 ANY_NAMESPACE cloned_elem;
@@ -1208,9 +1215,9 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
             return ANYARR_OK;
         }
         case TYPE_MAP: {
-            const HashMap *src_map = src->data.m;
-            HashMap *new_map;
-            arena_alloc(anyarr_arena, sizeof(HashMap), (void **) &new_map);
+            const HashMap_ *src_map = src->data.m;
+            HashMap_ *new_map;
+            arena_alloc(anyarr_arena, sizeof(HashMap_), (void **) &new_map);
             map_init(new_map);
             for (size_t i = 0; i < src_map->capacity; i++) {
                 if (src_map->entries[i].psl < 0) {
@@ -1305,13 +1312,13 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
             }
             return ANYARR_NOT_EQUAL;
         case TYPE_ARRAY: {
-            DynamicArray *aa = a->data.a;
-            DynamicArray *ab = b->data.a;
+            const DynamicArray_ *aa = a->data.a;
+            const DynamicArray_ *ab = b->data.a;
             if (aa->size != ab->size) {
                 return ANYARR_NOT_EQUAL;
             }
             for (size_t i = 0; i < aa->size; i++) {
-                anyarr_result res = any_equal(&aa->data[i], &ab->data[i]);
+                const anyarr_result res = any_equal(&aa->data[i], &ab->data[i]);
                 if (res != ANYARR_EQUAL) {
                     return res;
                 }
@@ -1319,8 +1326,8 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
             return ANYARR_EQUAL;
         }
         case TYPE_MAP: {
-            const HashMap *ma = a->data.m;
-            const HashMap *mb = b->data.m;
+            const HashMap_ *ma = a->data.m;
+            const HashMap_ *mb = b->data.m;
             if (ma->size != mb->size) {
                 return ANYARR_NOT_EQUAL;
             }
@@ -1345,7 +1352,7 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
 }
 
 
-static inline anyarr_result array_pop(DynamicArray *buf) {
+static inline anyarr_result array_pop(DynamicArray_ *buf) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1357,7 +1364,7 @@ static inline anyarr_result array_pop(DynamicArray *buf) {
 }
 
 
-static inline anyarr_result array_clear(DynamicArray *buf) {
+static inline anyarr_result array_clear(DynamicArray_ *buf) {
     if (buf == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
@@ -1366,7 +1373,7 @@ static inline anyarr_result array_clear(DynamicArray *buf) {
 }
 
 
-static inline const ANY_NAMESPACE *array_at(const DynamicArray *buf, size_t idx) {
+static inline const ANY_NAMESPACE *array_at(const DynamicArray_ *buf, size_t idx) {
     if (buf == NULL) {
         handle_error(ANYARR_ERR_NULLPTR);
         return NULL;
@@ -1521,8 +1528,8 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
     char*: assign_string,           \
     const char*: assign_string,     \
     Blob*: assign_blob,             \
-    DynamicArray*: assign_array,    \
-    HashMap*: assign_map,           \
+    DynamicArray_*: assign_array,   \
+    HashMap_*: assign_map,          \
     default: assign_ptr             \
 )(x)
 
@@ -1535,13 +1542,44 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
     double*: any_get_double,                            \
     const char**: any_get_string,                       \
     Blob*: any_get_blob,                                \
-    DynamicArray**: any_get_array,                      \
-    HashMap**: any_get_map,                             \
+    DynamicArray_**: any_get_array,                     \
+    HashMap_**: any_get_map,                            \
     void**: any_get_ptr                                 \
 )(val_ptr, out_ptr)
 
-#define get_at(buf_ptr, index, out_ptr) \
-get_any(array_at((buf_ptr), (index)), (out_ptr))
+#define path_get(root, path, out_ptr)                                      \
+get_any(({                                                                 \
+    ANY_NAMESPACE *_v = NULL;                                              \
+    ANY_NAMESPACE _tmp;                                                    \
+    ANY_NAMESPACE *_root = _Generic((root),                                \
+    ANY_NAMESPACE*: (root),                                                \
+    DynamicArray_*: (_tmp = assign_array((DynamicArray_*)(root)), &_tmp),  \
+    HashMap_*: (_tmp = assign_map((HashMap_*)(root)), &_tmp)               \
+);                                                                         \
+any_get_path(_root, (path), &_v);                                          \
+_v;                                                                        \
+}), (out_ptr))
 
+#define _any_iter_generic(root_ptr) _Generic((root_ptr),                                            \
+    ANY_NAMESPACE*: any_iter((ANY_NAMESPACE*)(root_ptr)),                                           \
+    DynamicArray_*: any_iter(&(ANY_NAMESPACE){TYPE_ARRAY, .data.a = (DynamicArray_*)(root_ptr)}),   \
+    HashMap_*: any_iter(&(ANY_NAMESPACE){TYPE_MAP,   .data.m = (HashMap_*)(root_ptr)})              \
+)
+
+#define foreach(item, root_ptr)                                          \
+    for (AnyIter _it = _any_iter_generic(root_ptr);                      \
+    (item = any_iter_next(&_it)) != NULL; )
+
+#define foreach_kv(key, item, root_ptr)                                  \
+    for (AnyIter _it = _any_iter_generic(root_ptr);                      \
+    (item = any_iter_next(&_it)) ? (key = _it.last_key, 1) : 0; )
+
+#define HashMap(name)  \
+    HashMap_ name;     \
+    map_init(&name)
+
+#define DynamicArray(name)   \
+    DynamicArray_ name;      \
+    array_init(&name)
 
 #endif
