@@ -369,14 +369,10 @@ struct DynamicArray_ {
     size_t capacity;
 };
 
-typedef struct {
-    char *key;
-    ANY_NAMESPACE value;
-    int32_t psl;
-} MapEntry; // Need to change to SoA so I can vectorize it for AVX
-
 struct HashMap_ {
-    MapEntry *entries;
+    int8_t *psl;
+    char **key;
+    ANY_NAMESPACE *value;
     size_t size;
     size_t capacity;
 };
@@ -391,7 +387,9 @@ typedef struct {
     size_t index;
     size_t bound;
     ANY_NAMESPACE *data;
-    MapEntry *entries;
+    int8_t *psl;
+    char **key;
+    ANY_NAMESPACE *value;
     const char *last_key;
 } AnyIter;
 
@@ -844,9 +842,11 @@ static inline anyarr_result map_init(HashMap_ *m) {
     }
     m->size = 0;
     m->capacity = 16;
-    arena_alloc(anyarr_arena, m->capacity * sizeof(MapEntry), (void **) &m->entries);
+    arena_alloc(anyarr_arena, m->capacity * sizeof(int8_t), (void **) &m->psl);
+    arena_alloc(anyarr_arena, m->capacity * sizeof(char*), (void **) &m->key);
+    arena_alloc(anyarr_arena, m->capacity * sizeof(ANY_NAMESPACE), (void **) &m->value);
     for (size_t i = 0; i < m->capacity; i++) {
-        m->entries[i].psl = -1;
+        m->psl[i] = -1;
     }
     return ANYARR_OK;
 }
@@ -856,18 +856,17 @@ static inline anyarr_result map_resize(HashMap_ *m);
 
 
 static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAMESPACE **out_value) {
-    if (m == NULL || m->entries == NULL || key == NULL) {
+    if (m == NULL || m->key == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
     size_t index = map_hash(key) & (m->capacity - 1);
-    int32_t psl = 0;
+    int8_t psl = 0;
     while (1) {
-        MapEntry *slot = &m->entries[index];
-        if (slot->psl < 0 || slot->psl < psl) {
+        if (m->psl[index] < 0 || m->psl[index] < psl) {
             return handle_error(ANYARR_ERR_EMPTY);
         }
-        if (strcmp(slot->key, key) == 0) {
-            *out_value = &slot->value;
+        if (strcmp(m->key[index], key) == 0) {
+            *out_value = &m->value[index];
             return ANYARR_OK;
         }
         index = (index + 1) & (m->capacity - 1);
@@ -877,18 +876,17 @@ static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAME
 
 
 static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, ANY_NAMESPACE **out_value) {
-    if (m == NULL || m->entries == NULL || key == NULL) {
+    if (m == NULL || m->key == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
     size_t index = map_hash(key) & (m->capacity - 1);
-    int32_t psl = 0;
+    int8_t psl = 0;
     while (1) {
-        MapEntry *slot = &m->entries[index];
-        if (slot->psl < 0 || slot->psl < psl) {
+        if (m->psl[index] < 0 || m->psl[index] < psl) {
             return ANYARR_ERR_EMPTY;
         }
-        if (strcmp(slot->key, key) == 0) {
-            *out_value = &slot->value;
+        if (strcmp(m->key[index], key) == 0) {
+            *out_value = &m->value[index];
             return ANYARR_OK;
         }
         index = (index + 1) & (m->capacity - 1);
@@ -898,7 +896,7 @@ static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, A
 
 
 static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY_NAMESPACE value) {
-    if (m == NULL || m->entries == NULL || key == NULL) {
+    if (m == NULL || m->key == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
     ANY_NAMESPACE *existing;
@@ -914,26 +912,25 @@ static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY
     arena_alloc(anyarr_arena, key_len + 1, (void **) &current_key);
     memcpy(current_key, key, key_len + 1);
     ANY_NAMESPACE current_val = value;
-    int32_t current_psl = 0;
+    int8_t current_psl = 0;
     size_t index = map_hash(key) & (m->capacity - 1);
     while (1) {
-        MapEntry *slot = &m->entries[index];
-        if (slot->psl < 0) {
-            slot->key = current_key;
-            slot->value = current_val;
-            slot->psl = current_psl;
+        if (m->psl[index] < 0) {
+            m->key[index] = current_key;
+            m->value[index] = current_val;
+            m->psl[index] = current_psl;
             m->size++;
             return ANYARR_OK;
         }
-        if (slot->psl < current_psl) {
-            char *tk = slot->key;
-            slot->key = current_key;
+        if (m->psl[index] < current_psl) {
+            char *tk = m->key[index];
+            m->key[index] = current_key;
             current_key = tk;
-            const ANY_NAMESPACE tv = slot->value;
-            slot->value = current_val;
+            const ANY_NAMESPACE tv = m->value[index];
+            m->value[index] = current_val;
             current_val = tv;
-            const int32_t tp = slot->psl;
-            slot->psl = current_psl;
+            const int8_t tp = m->psl[index];
+            m->psl[index] = current_psl;
             current_psl = tp;
         }
         index = (index + 1) & (m->capacity - 1);
@@ -944,43 +941,50 @@ static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY
 
 
 static inline anyarr_result map_resize(HashMap_ *m) {
-    const MapEntry *old_entries = m->entries;
+    const int8_t *old_psl = m->psl;
+    char **old_key = m->key;
+    const ANY_NAMESPACE *old_value = m->value;
     const size_t old_capacity = m->capacity;
     const size_t new_capacity = old_capacity << 1;
-    MapEntry *new_entries;
-    arena_alloc(anyarr_arena, new_capacity * sizeof(MapEntry), (void **) &new_entries);
+    int8_t *new_psl = m->psl;
+    char **new_key = m->key;
+    ANY_NAMESPACE *new_value = m->value;
+    arena_alloc(anyarr_arena, new_capacity * sizeof(int8_t), (void **) &new_psl);
+    arena_alloc(anyarr_arena, new_capacity * sizeof(char *), (void **) &new_key);
+    arena_alloc(anyarr_arena, new_capacity * sizeof(ANY_NAMESPACE), (void **) &new_value);
     for (size_t i = 0; i < new_capacity; i++) {
-        new_entries[i].psl = -1;
+        new_psl[i] = -1;
     }
-    m->entries = new_entries;
+    m->psl = new_psl;
+    m->key = new_key;
+    m->value = new_value;
     m->capacity = new_capacity;
     m->size = 0;
     for (size_t i = 0; i < old_capacity; i++) {
-        if (old_entries[i].psl < 0) {
+        if (old_psl[i] < 0) {
             continue;
         }
-        char *current_key = old_entries[i].key;
-        ANY_NAMESPACE current_val = old_entries[i].value;
-        int32_t current_psl = 0;
+        char *current_key = old_key[i];
+        ANY_NAMESPACE current_val = old_value[i];
+        int8_t current_psl = 0;
         size_t index = map_hash(current_key) & (m->capacity - 1);
         while (1) {
-            MapEntry *slot = &m->entries[index];
-            if (slot->psl < 0) {
-                slot->key = current_key;
-                slot->value = current_val;
-                slot->psl = current_psl;
+            if (m->psl[index] < 0) {
+                m->key[index] = current_key;
+                m->value[index] = current_val;
+                m->psl[index] = current_psl;
                 m->size++;
                 break;
             }
-            if (slot->psl < current_psl) {
-                char *tk = slot->key;
-                slot->key = current_key;
+            if (m->psl[index] < current_psl) {
+                char *tk = m->key[index];
+                m->key[index] = current_key;
                 current_key = tk;
-                ANY_NAMESPACE tv = slot->value;
-                slot->value = current_val;
+                ANY_NAMESPACE tv = m->value[index];
+                m->value[index] = current_val;
                 current_val = tv;
-                int32_t tp = slot->psl;
-                slot->psl = current_psl;
+                const int8_t tp = m->psl[index];
+                m->psl[index] = current_psl;
                 current_psl = tp;
             }
             index = (index + 1) & (m->capacity - 1);
@@ -992,17 +996,16 @@ static inline anyarr_result map_resize(HashMap_ *m) {
 
 
 static inline anyarr_result map_remove(HashMap_ *m, const char *key) {
-    if (m == NULL || m->entries == NULL || key == NULL) {
+    if (m == NULL || m->key == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
     size_t index = map_hash(key) & (m->capacity - 1);
-    int32_t psl = 0;
+    int8_t psl = 0;
     while (1) {
-        const MapEntry *slot = &m->entries[index];
-        if (slot->psl < 0 || slot->psl < psl) {
+        if (m->psl[index] < 0 || m->psl[index] < psl) {
             return handle_error(ANYARR_ERR_EMPTY);
         }
-        if (strcmp(slot->key, key) == 0) {
+        if (strcmp(m->key[index], key) == 0) {
             break;
         }
         index = (index + 1) & (m->capacity - 1);
@@ -1010,16 +1013,16 @@ static inline anyarr_result map_remove(HashMap_ *m, const char *key) {
     }
     while (1) {
         const size_t next = (index + 1) & (m->capacity - 1);
-        const MapEntry *succ = &m->entries[next];
-        if (succ->psl < 1) {
+        if (m->psl[next] < 1) {
             break;
         }
-        m->entries[index] = *succ;
-        m->entries[index].psl -= 1;
+        m->psl[index] = (int8_t) (m->psl[next] - 1);
+        m->key[index] = m->key[next];
+        m->value[index] = m->value[next];
         index = next;
     }
-    m->entries[index].psl = -1;
-    m->entries[index].key = NULL;
+    m->psl[index] = -1;
+    m->key[index] = NULL;
     m->size--;
     return ANYARR_OK;
 }
@@ -1220,15 +1223,15 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
             arena_alloc(anyarr_arena, sizeof(HashMap_), (void **) &new_map);
             map_init(new_map);
             for (size_t i = 0; i < src_map->capacity; i++) {
-                if (src_map->entries[i].psl < 0) {
+                if (src_map->psl[i] < 0) {
                     continue;
                 }
                 ANY_NAMESPACE cloned_val;
-                const anyarr_result res = any_clone(&src_map->entries[i].value, &cloned_val);
+                const anyarr_result res = any_clone(&src_map->value[i], &cloned_val);
                 if (res != ANYARR_OK) {
                     return res;
                 }
-                map_put_impl(new_map, src_map->entries[i].key, cloned_val);
+                map_put_impl(new_map, src_map->key[i], cloned_val);
             }
             *dest = assign_map(new_map);
             return ANYARR_OK;
@@ -1332,14 +1335,14 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
                 return ANYARR_NOT_EQUAL;
             }
             for (size_t i = 0; i < ma->capacity; i++) {
-                if (ma->entries[i].psl < 0) {
+                if (ma->psl[i] < 0) {
                     continue;
                 }
                 ANY_NAMESPACE *val_b;
-                if (map_get_silent(mb, ma->entries[i].key, &val_b) != ANYARR_OK) {
+                if (map_get_silent(mb, ma->key[i], &val_b) != ANYARR_OK) {
                     return ANYARR_NOT_EQUAL;
                 }
-                const anyarr_result res = any_equal(&ma->entries[i].value, val_b);
+                const anyarr_result res = any_equal(&ma->value[i], val_b);
                 if (res != ANYARR_EQUAL) {
                     return res;
                 }
@@ -1397,7 +1400,9 @@ static inline AnyIter any_iter(const ANY_NAMESPACE *root) {
         it.bound = root->data.a->size;
     } else if (root->type == TYPE_MAP) {
         it.type = TYPE_MAP;
-        it.entries = root->data.m->entries;
+        it.psl = root->data.m->psl;
+        it.key = root->data.m->key;
+        it.value = root->data.m->value;
         it.bound = root->data.m->capacity;
     }
     return it;
@@ -1414,16 +1419,15 @@ static inline ANY_NAMESPACE *any_iter_next(AnyIter *it) {
 
     if (it->type == TYPE_MAP) {
         while (it->index < it->bound) {
-            MapEntry *slot = &it->entries[it->index++];
-            if (slot->psl < 0) {
+            if (it->psl[it->index] < 0) {
+                it->index++;
                 continue;
             }
-            it->last_key = slot->key;
-            return &slot->value;
+            it->last_key = it->key[it->index++];
+            return &it->value[it->index++];
         }
         return NULL;
     }
-
     return NULL;
 }
 
