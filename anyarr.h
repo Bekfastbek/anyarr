@@ -10,19 +10,11 @@
 
 #ifndef ANYARR_H
 #define ANYARR_H
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
-// The true/false values in stdbool get converted into int types so the hacky solution I thought is to undef and explicitly define true/false as (_Bool) types so assign_any doesn't confuse them with int
-#ifndef bool
-#define bool _Bool
-#endif
-#undef true
-#undef false
-#define true  ((_Bool)1)
-#define false ((_Bool)0)
 
 /*TO DO:
  * SIMD: x86 AVX512, AVX2 and ARM64 NEON (Apple doesn't support SVE)
@@ -76,7 +68,7 @@
 #endif
 
 #define WALK_SHALLOW 1
-#define WALK_DEEP    0
+#define WALK_DEEP 0 // 0 means maximum recursion
 
 
 typedef enum {
@@ -103,7 +95,7 @@ enum Type {
     TYPE_STRING_SMALL,
     TYPE_BLOB,
     TYPE_BLOB_SMALL,
-    TYPE_PTR, // Not supporting a footgun so the ownership is on your hands not arena and only providing clone and comparison safely with any_print only providing pointer address, but I was thinking of supporting void* to be stored in Arena in the future
+    TYPE_PTR,   // Not supporting a footgun so the ownership is on your hands not arena and only providing clone and comparison safely with any_print only providing pointer address, but I was thinking of supporting void* to be stored in Arena in the future
     TYPE_ARRAY,
     TYPE_MAP
 };
@@ -394,8 +386,8 @@ typedef struct {
     uint8_t type;
     size_t index;
     size_t bound;
-    ANY_NAMESPACE *data;
     uint8_t *fingerprint;
+    ANY_NAMESPACE *data;
     char **key;
     ANY_NAMESPACE *value;
     const char *last_key;
@@ -417,7 +409,7 @@ static inline ANY_NAMESPACE assign_char(const char c) {
 }
 
 
-static inline ANY_NAMESPACE assign_int_(const int64_t i) {  // Internal until number arrays are made
+static inline ANY_NAMESPACE assign_int_(const int64_t i) { // Internal until number arrays are made
     return (ANY_NAMESPACE){TYPE_INT, .data.i = i};
 }
 
@@ -644,7 +636,7 @@ static inline AnyIter any_iter(const ANY_NAMESPACE *root);
 static inline ANY_NAMESPACE *any_iter_next(AnyIter *it);
 
 static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) {
-    #define INDENT() for (int _i = 0; _i < depth; _i++) printf("  ")
+#define INDENT() for (int _i = 0; _i < depth; _i++) printf("  ")
 
     switch (val->type) {
         case TYPE_NULL:
@@ -751,14 +743,16 @@ static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) 
             return ANYARR_OK;
         }
 
-        #undef INDENT
+#undef INDENT
         default:
             return handle_error(ANYARR_ERR_TYPE_MISMATCH);
     }
 }
+
 static inline anyarr_result any_print_helper(ANY_NAMESPACE val) {
     return any_print_impl(&val, 0);
 }
+
 #define any_print(x) _Generic((x),              \
     ANY_NAMESPACE*: any_print_impl((x), 0),     \
     default: any_print_helper(assign_any(x))    \
@@ -770,24 +764,32 @@ static inline uint64_t map_hash(const char *key) {
     static const uint64_t WY1 = 0xe7037ed1a0b428dbull;
     size_t len = strlen(key);
     const uint8_t *p = (const uint8_t *)key;
-    uint64_t seed = anyarr_arena->hash_seed;
-#ifdef __AVX512DQ__ // I am NOT writing anything besides AVX512 other's have too much boilerplate for me to care
-    __m512i seeds = _mm512_set1_epi64(anyarr_arena->hash_seed_c1);
-    __m512i c0 = _mm512_set1_epi64(WY0);
+// I can't imagine how horrible AVX2 will be
+#ifdef __AVX512DQ__
+#include <immintrin.h>
+    __m512i seeds = _mm512_set1_epi64((int64_t)anyarr_arena->hash_seed_c1);
+    const __m512i c0 = _mm512_set1_epi64((int64_t)WY0);
     for (; len >= 64; len -= 64, p += 64) {
-        __m512i chunk = _mm512_loadu_si512(p);
-        __m512i a = _mm512_xor_si512(chunk, c0);
-        __m512i mul_64 = _mm512_mullo_epi64(a, seeds);
+        const __m512i chunk = _mm512_loadu_si512(p);
+        const __m512i a = _mm512_xor_si512(chunk, c0);
+        const __m512i mul_64 = _mm512_mullo_epi64(a, seeds);
         seeds = _mm512_xor_si512(seeds, mul_64);
     }
     if (len > 0) {
-        __mmask64 tail_mask = (1ULL << len) - 1;
-        __m512i tail = _mm512_maskz_loadu_epi8(tail_mask, p);
-        __m512i a = _mm512_xor_si512(tail, c0);
-        __m512i mul_64 = _mm512_mullo_epi64(a, seeds);
+        const __mmask64 tail_mask = (1ULL << len) - 1;
+        const __m512i tail = _mm512_maskz_loadu_epi8(tail_mask, p);
+        const __m512i a = _mm512_xor_si512(tail, c0);
+        const __m512i mul_64 = _mm512_mullo_epi64(a, seeds);
         seeds = _mm512_xor_si512(seeds, mul_64);
     }
-    seed = _mm512_reduce_xor_epi64(seeds);
+    // Diving into 256 bit instructions since there's no masked xor for 512 bits
+    const __m256i lo256 = _mm512_castsi512_si256(seeds);
+    const __m256i hi256 = _mm512_extracti64x4_epi64(seeds, 1);
+    const __m256i xor256 = _mm256_xor_si256(lo256, hi256);
+    const __m128i lo128 = _mm256_castsi256_si128(xor256);
+    const __m128i hi128 = _mm256_extracti128_si256(xor256, 1);
+    const __m128i xor128 = _mm_xor_si128(lo128, hi128);
+    uint64_t seed = (uint64_t)_mm_extract_epi64(xor128, 0) ^ (uint64_t)_mm_extract_epi64(xor128, 1);
 #else
     for (; len >= 8; len -= 8, p += 8) {
         uint64_t a = 0, b = 0;
@@ -799,23 +801,25 @@ static inline uint64_t map_hash(const char *key) {
     uint64_t a = 0, b = 0;
     switch (len) {
         case 7:
-            b  = (uint64_t)p[6] << 32;
+            b = (uint64_t)p[6] << 32;
         case 6:
             b |= (uint64_t)p[5] << 16;
         case 5:
-            b |= (uint64_t)p[4] <<  8;
+            b |= (uint64_t)p[4] << 8;
         case 4:
             memcpy(&a, p, 4);
             break;
         case 3:
-            a  = (uint64_t)p[2] << 16;
+            a = (uint64_t)p[2] << 16;
         case 2:
-            a |= (uint64_t)p[1] <<  8;
+            a |= (uint64_t)p[1] << 8;
         case 1:
-            a |= (uint64_t)p[0]; b = 0;
+            a |= (uint64_t)p[0];
+            b = 0;
             break;
         case 0:
-            a = 0; b = 0;
+            a = 0;
+            b = 0;
             break;
         default:
             fprintf(stderr, "[ANYARR] Unexpected case in map hashing."); // Just there to satisfy the ide complaining about missing default case
@@ -848,7 +852,7 @@ static inline anyarr_result map_init(HashMap_ *m) {
     m->capacity = 16;
     m->tombstone = 0;
     arena_alloc(anyarr_arena, m->capacity * sizeof(uint8_t), (void **) &m->fingerprint);
-    arena_alloc(anyarr_arena, m->capacity * sizeof(char*), (void **) &m->key);
+    arena_alloc(anyarr_arena, m->capacity * sizeof(char *), (void **) &m->key);
     arena_alloc(anyarr_arena, m->capacity * sizeof(ANY_NAMESPACE), (void **) &m->value);
     memset(m->fingerprint, CTRL_EMPTY, m->capacity);
     return ANYARR_OK;
@@ -865,7 +869,37 @@ static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAME
     const uint64_t hash = map_hash(key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;  // There's a 1/255 chance that the fingerprint itself can store 0xFF or 0xFE as value so we truncate the first bit so it never reaches that range
     size_t index = hash & (m->capacity - 1);
-    while (1) {
+#ifdef __AVX512DQ__
+    const __m512i fingerprint_vec = _mm512_set1_epi8((char)fingerprint);
+    const __m512i empty_vec = _mm512_set1_epi8((char)CTRL_EMPTY);
+    while (true) {
+        const size_t remaining = m->capacity - index;
+        __mmask64 load_mask;
+        if (remaining >= 64) {
+            load_mask = ~0ULL;
+        } else {
+            load_mask = (1ULL << remaining) - 1;
+        }
+        const __m512i chunk = _mm512_maskz_loadu_epi8(load_mask, &m->fingerprint[index]);
+        const __mmask64 non_empty = _mm512_mask_cmpneq_epi8_mask(load_mask, chunk, empty_vec);
+        const __mmask64 candidates = _mm512_mask_cmpeq_epi8_mask(non_empty, chunk, fingerprint_vec);
+        uint64_t hits = (uint64_t)candidates;
+        while (hits) {
+            const int slot = _tzcnt_u64(hits);
+            const size_t i = (index + slot) & (m->capacity - 1);
+            if (strcmp(m->key[i], key) == 0) {
+                *out_value = &m->value[i];
+                return ANYARR_OK;
+            }
+            hits = _blsr_u64(hits);
+        }
+        if (_kortestz_mask64_u8(non_empty, non_empty)) {
+            return handle_error(ANYARR_ERR_EMPTY);
+        }
+        index = (index + 64) & (m->capacity - 1);
+    }
+#else
+    while (true) {
         const uint8_t ctrl = m->fingerprint[index];
         if (ctrl == CTRL_EMPTY) {
             return handle_error(ANYARR_ERR_EMPTY);
@@ -876,9 +910,11 @@ static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAME
         }
         index = (index + 1) & (m->capacity - 1);
     }
+#endif
 }
 
 
+// Internal and only returns value instead of printing to stderr
 static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, ANY_NAMESPACE **out_value) {
     if (m == NULL || m->key == NULL || key == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
@@ -886,7 +922,37 @@ static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, A
     const uint64_t hash = map_hash(key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;
     size_t index = hash & (m->capacity - 1);
-    while (1) {
+#ifdef __AVX512DQ__
+    const __m512i fingerprint_vec = _mm512_set1_epi8((char)fingerprint);
+    const __m512i empty_vec = _mm512_set1_epi8((char)CTRL_EMPTY);
+    while (true) {
+        const size_t remaining = m->capacity - index;
+        __mmask64 load_mask;
+        if (remaining >= 64) {
+            load_mask = ~0ULL;
+        } else {
+            load_mask = (1ULL << remaining) - 1;
+        }
+        const __m512i chunk = _mm512_maskz_loadu_epi8(load_mask, &m->fingerprint[index]);
+        const __mmask64 non_empty = _mm512_mask_cmpneq_epi8_mask(load_mask, chunk, empty_vec);
+        const __mmask64 candidates = _mm512_mask_cmpeq_epi8_mask(non_empty, chunk, fingerprint_vec);
+        uint64_t hits = (uint64_t)candidates;
+        while (hits) {
+            const int slot = _tzcnt_u64(hits);
+            const size_t i = (index + slot) & (m->capacity - 1);
+            if (strcmp(m->key[i], key) == 0) {
+                *out_value = &m->value[i];
+                return ANYARR_OK;
+            }
+            hits = _blsr_u64(hits);
+        }
+        if (_kortestz_mask64_u8(non_empty, non_empty)) {
+            return handle_error(ANYARR_ERR_EMPTY);
+        }
+        index = (index + 64) & (m->capacity - 1);
+    }
+#else
+    while (true) {
         const uint8_t ctrl = m->fingerprint[index];
         if (ctrl == CTRL_EMPTY) {
             return ANYARR_ERR_EMPTY;
@@ -897,6 +963,7 @@ static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, A
         }
         index = (index + 1) & (m->capacity - 1);
     }
+#endif
 }
 
 
@@ -919,10 +986,11 @@ static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY
     arena_alloc(anyarr_arena, key_len + 1, (void **) &current_key);
     memcpy(current_key, key, key_len + 1);
     size_t index = hash & (m->capacity - 1);
-    while (1) {
-        uint8_t ctrl = m->fingerprint[index];
+    while (true) {
+        const uint8_t ctrl = m->fingerprint[index];
         if (ctrl == CTRL_EMPTY || ctrl == CTRL_DELETED) {
-            if (ctrl == CTRL_DELETED) m->tombstone--;
+            if (ctrl == CTRL_DELETED)
+                m->tombstone--;
             m->key[index] = current_key;
             m->value[index] = value;
             m->fingerprint[index] = fingerprint;
@@ -938,7 +1006,7 @@ static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY
 static inline anyarr_result map_resize(HashMap_ *m) {
     const uint8_t *old_fingerprint = m->fingerprint;
     char **old_key = m->key;
-    const ANY_NAMESPACE *old_value  = m->value;
+    const ANY_NAMESPACE *old_value = m->value;
     const size_t old_capacity = m->capacity;
     size_t new_capacity = old_capacity;
     if (m->size * 2 >= old_capacity) {
@@ -981,8 +1049,8 @@ static inline anyarr_result map_remove(HashMap_ *m, const char *key) {
     const uint64_t hash = map_hash(key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;
     size_t index = hash & (m->capacity - 1);
-    while (1) {
-        uint8_t ctrl = m->fingerprint[index];
+    while (true) {
+        const uint8_t ctrl = m->fingerprint[index];
         if (ctrl == CTRL_EMPTY) {
             return handle_error(ANYARR_ERR_EMPTY);
         }
@@ -1084,7 +1152,7 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
     }
     ANY_NAMESPACE *current = root;
     const char *p = path;
-    char segment[256];  // Not worth making it arena allocated
+    char segment[256]; // Not worth making it arena allocated
     while (*p != '\0') {
         while (*p == '.' || *p == '[' || *p == ']') {
             p++;
@@ -1162,7 +1230,7 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
             *dest = assign_string(src->data.s);
             return ANYARR_OK;
         case TYPE_ARRAY: {
-            DynamicArray_ *src_arr = src->data.a;
+            const DynamicArray_ *src_arr = src->data.a;
             DynamicArray_ *new_arr;
             arena_alloc(anyarr_arena, sizeof(DynamicArray_), (void **) &new_arr);
             array_init(new_arr);
@@ -1217,7 +1285,6 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
     if (a == NULL || b == NULL) {
         return handle_error(ANYARR_ERR_NULLPTR);
     }
-
     if ((a->type == TYPE_STRING || a->type == TYPE_STRING_SMALL) && (
             b->type == TYPE_STRING || b->type == TYPE_STRING_SMALL)) {
         const char *sa, *sb;
@@ -1229,7 +1296,8 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
         return ANYARR_NOT_EQUAL;
     }
 
-    if ((a->type == TYPE_BLOB || a->type == TYPE_BLOB_SMALL) && (b->type == TYPE_BLOB || b->type == TYPE_BLOB_SMALL)) {
+    if ((a->type == TYPE_BLOB || a->type == TYPE_BLOB_SMALL) && (
+        b->type == TYPE_BLOB || b->type == TYPE_BLOB_SMALL)) {
         Blob ba, bb;
         any_get_blob(a, &ba);
         any_get_blob(b, &bb);
@@ -1306,7 +1374,9 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
             }
             for (size_t i = 0; i < ma->capacity; i++) {
                 const uint8_t ctrl = ma->fingerprint[i];
-                if (ctrl == CTRL_EMPTY || ctrl == CTRL_DELETED) { continue; }
+                if (ctrl == CTRL_EMPTY || ctrl == CTRL_DELETED) {
+                    continue;
+                }
                 ANY_NAMESPACE *val_b;
                 if (map_get_silent(mb, ma->key[i], &val_b) != ANYARR_OK) {
                     return ANYARR_NOT_EQUAL;
@@ -1484,6 +1554,7 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
 }
 
 
+// Since we covered every single datatype, natural fallback to void* would allow us to store void* conveniently
 #define assign_any(x) _Generic((x), \
     _Bool: assign_bool,             \
     char: assign_char,              \
@@ -1549,13 +1620,5 @@ _v;                                                                        \
 #define foreach_kv(key, item, root_ptr)                                  \
     for (AnyIter _it = _any_iter_generic(root_ptr);                      \
     (item = any_iter_next(&_it)) ? (key = _it.last_key, 1) : 0; )
-
-#define HashMap(name)  \
-    HashMap_ name;     \
-    map_init(&name)
-
-#define DynamicArray(name)   \
-    DynamicArray_ name;      \
-    array_init(&name)
 
 #endif
