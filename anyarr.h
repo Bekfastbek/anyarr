@@ -10,15 +10,27 @@
 
 #ifndef ANYARR_H
 #define ANYARR_H
-#include <stdbool.h>
+#if __STDC_VERSION__ >= 202311L
+    // Ignore stdbool import since C23 has bool types built-in
+#else
+#   include <stdbool.h>
+#endif
+#if defined(__AVX512DQ__) || defined(__AVX2__) || defined(__AVX__)
+#   include <immintrin.h>
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202000L
+#  ifndef nullptr
+#    define nullptr ((void*)0)
+#  endif
+#endif
+
 /*TO DO:
  * SIMD: x86 AVX512, AVX2 and ARM64 NEON (Apple doesn't support SVE)
- * SIMD Improvements: any_equal, arena_restore
  * NumArray: typed SIMD array (double), Int64Array (int64_t exact integers) but the priority is the double array and let it also convert integers into double
  * _Thread_local arenas with a thread pool
  */
@@ -32,19 +44,19 @@
 #   endif
 #   include <windows.h>
 #else
-#   define ANYARR_PLATFORM_POSIX
 #   include <sys/mman.h>
+#   include <sys/random.h>
 #   ifndef MAP_ANONYMOUS
 #       define MAP_ANONYMOUS MAP_ANON
 #   endif
 #endif
 
+#ifndef ARENA_CTX
+#   define ARENA_CTX anyarr_arena
+#endif
+
 #ifndef ANYARR_RESERVE_SIZE
-#   ifdef ANYARR_PLATFORM_WINDOWS
-#       define ANYARR_RESERVE_SIZE (8ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL)
-#   else
-#       define ANYARR_RESERVE_SIZE (128ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL)
-#   endif
+#   define ANYARR_RESERVE_SIZE (4ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL)
 #endif
 
 #ifndef ARENA_COMMIT_CHUNK
@@ -67,6 +79,10 @@
 #   define ANYARR_PREFETCH_DISTANCE 4
 #endif
 
+#ifndef ANYARR_L2_SIZE
+#   define ANYARR_L2_SIZE 256
+#endif
+
 #define WALK_SHALLOW 1
 #define WALK_DEEP 0 // 0 means maximum recursion
 
@@ -77,7 +93,7 @@ typedef enum {
     ANYARR_NOT_EQUAL = 2,
     // These would be also assuming the type of TYPE_INT when casting to ANY_NAMESPACE, so I just associated them with hex values
     ANYARR_ERR_OOM = 0xF0,
-    ANYARR_ERR_NULLPTR = 0xF1,
+    ANYARR_ERR_TYPE_NULLPTR = 0xF1,
     ANYARR_ERR_OUT_OF_BOUNDS = 0xF2,
     ANYARR_ERR_EMPTY = 0xF3,
     ANYARR_ERR_TYPE_MISMATCH = 0xF4,
@@ -101,22 +117,22 @@ enum Type {
 };
 
 
-static inline anyarr_result handle_error(const anyarr_result error_code) {
+static inline anyarr_result handle_error(const anyarr_result error_code, uint32_t line, const char* file) {
     switch (error_code) {
         case ANYARR_ERR_OOM:
-            fprintf(stderr, "[ANYARR] Out of Memory. Exiting...\n");
+            fprintf(stderr, "[ANYARR] Out of Memory. Exiting...\nLine: %d\nFile: %s\n", line, file);
             abort();
-        case ANYARR_ERR_NULLPTR:
-            fprintf(stderr, "[ANYARR] Null pointer was passed.\n");
+        case ANYARR_ERR_TYPE_NULLPTR:
+            fprintf(stderr, "[ANYARR] Null pointer was passed.\nLine: %d\nFile: %s\n", line, file);
             break;
         case ANYARR_ERR_OUT_OF_BOUNDS:
-            fprintf(stderr, "[ANYARR] Index out of bounds.\n");
+            fprintf(stderr, "[ANYARR] Index out of bounds.\nLine: %d\nFile: %s\n", line, file);
             break;
         case ANYARR_ERR_EMPTY:
-            fprintf(stderr, "[ANYARR] Key or index not found.\n");
+            fprintf(stderr, "[ANYARR] Key or index not found.\nLine: %d\nFile: %s\n", line, file);
             break;
         case ANYARR_ERR_TYPE_MISMATCH:
-            fprintf(stderr, "[ANYARR] Type mismatch.\n");
+            fprintf(stderr, "[ANYARR] Type mismatch.\nLine: %d\nFile: %s\n", line, file);
             break;
         default:
             break;
@@ -136,10 +152,10 @@ typedef struct {
 
 #ifdef ANYARR_IMPLEMENTATION
 ARENA_NAMESPACE anyarr_arena_instance;
-ARENA_NAMESPACE *anyarr_arena = NULL;
+ARENA_NAMESPACE *ARENA_CTX = nullptr;
 #else
 extern ARENA_NAMESPACE anyarr_arena_instance;
-extern ARENA_NAMESPACE *anyarr_arena;
+extern ARENA_NAMESPACE *ARENA_CTX;
 #endif
 
 
@@ -160,7 +176,7 @@ static inline uint64_t make_seed(void) {
 }
 
 
-static inline size_t arena_align_up(size_t n) {
+static inline size_t arena_align_up(const size_t n) {
     return (n + 15) & ~15;
 }
 
@@ -171,16 +187,16 @@ static inline anyarr_result arena_commit(ARENA_NAMESPACE *a, const size_t extra)
         new_committed = a->reserved;
     }
     if (new_committed <= a->committed) {
-        return handle_error(ANYARR_ERR_OOM);
+        return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
     }
     size_t delta = new_committed - a->committed;
 #ifdef ANYARR_PLATFORM_WINDOWS
-    if (VirtualAlloc(a->base + a->committed, delta, MEM_COMMIT, PAGE_READWRITE) == NULL) {
-        return handle_error(ANYARR_ERR_OOM);
+    if (VirtualAlloc(a->base + a->committed, delta, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
+        return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
     }
 #else
     if (mprotect(a->base + a->committed, delta, PROT_READ | PROT_WRITE) != 0) {
-        return handle_error(ANYARR_ERR_OOM);
+        return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
     }
 #endif
     a->committed = new_committed;
@@ -191,22 +207,22 @@ static inline anyarr_result arena_commit(ARENA_NAMESPACE *a, const size_t extra)
 static inline void auto_init(void);
 
 static inline anyarr_result arena_alloc(ARENA_NAMESPACE *a, const size_t size, void **out) {
-    if (__builtin_expect(anyarr_arena == NULL, 0)) {
+    if (__builtin_expect(ARENA_CTX == nullptr, 0)) {
         auto_init();
     }
-    if (a == NULL) {
-        a = anyarr_arena;
+    if (a == nullptr) {
+        a = ARENA_CTX;
     }
-    if (a->base == NULL || size == 0 || out == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (a->base == nullptr || size == 0 || out == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     const size_t new_used = a->used + arena_align_up(size);
     if (new_used > a->reserved) {
-        return handle_error(ANYARR_ERR_OOM);
+        return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
     }
     if (new_used > a->committed) {
         if (arena_commit(a, new_used - a->committed) != ANYARR_OK) {
-            return handle_error(ANYARR_ERR_OOM);
+            return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
         }
     }
     *out = a->base + a->used;
@@ -216,19 +232,19 @@ static inline anyarr_result arena_alloc(ARENA_NAMESPACE *a, const size_t size, v
 
 
 static inline anyarr_result arena_init(ARENA_NAMESPACE *a) {
-    if (a == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (a == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     size_t reserve_size = (ANYARR_RESERVE_SIZE + ARENA_COMMIT_CHUNK - 1) & ~(ARENA_COMMIT_CHUNK - 1);
 #ifdef ANYARR_PLATFORM_WINDOWS
-    void *base = VirtualAlloc(NULL, reserve_size, MEM_RESERVE, PAGE_NOACCESS);
-    if (base == NULL) {
-        return handle_error(ANYARR_ERR_OOM);
+    void *base = VirtualAlloc(nullptr, reserve_size, MEM_RESERVE, PAGE_NOACCESS);
+    if (base == nullptr) {
+        return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
     }
 #else
-    void *base = mmap(NULL, reserve_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *base = mmap(nullptr, reserve_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) {
-        return handle_error(ANYARR_ERR_OOM);
+        return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
     }
 #endif
     a->base = (uint8_t *) base;
@@ -240,8 +256,8 @@ static inline anyarr_result arena_init(ARENA_NAMESPACE *a) {
 
 
 static inline anyarr_result arena_reset(ARENA_NAMESPACE *a) {
-    if (a == NULL || a->base == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (a == nullptr || a->base == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     a->used = 0;
     return ANYARR_OK;
@@ -249,15 +265,15 @@ static inline anyarr_result arena_reset(ARENA_NAMESPACE *a) {
 
 
 static inline anyarr_result arena_free(ARENA_NAMESPACE *a) {
-    if (a->base == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (a->base == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
 #ifdef ANYARR_PLATFORM_WINDOWS
     VirtualFree(a->base, 0, MEM_RELEASE);
 #else
     munmap(a->base, a->reserved);
 #endif
-    a->base = NULL;
+    a->base = nullptr;
     a->used = 0;
     a->committed = 0;
     a->reserved = 0;
@@ -267,15 +283,16 @@ static inline anyarr_result arena_free(ARENA_NAMESPACE *a) {
 
 static inline size_t arena_save(const ARENA_NAMESPACE *a) {
     const ARENA_NAMESPACE *arena = a;
-    if (arena == NULL) {
-        arena = anyarr_arena;
+    if (arena == nullptr) {
+        arena = ARENA_CTX;
     }
     return arena->used;
 }
 
+
 static inline void arena_restore(ARENA_NAMESPACE *a, const size_t saved) {
-    if (a == NULL) {
-        a = anyarr_arena;
+    if (a == nullptr) {
+        a = ARENA_CTX;
     }
     if (saved >= a->used) {
         return;
@@ -285,28 +302,28 @@ static inline void arena_restore(ARENA_NAMESPACE *a, const size_t saved) {
 
 
 static inline void checkpoint_cleanup(const size_t *cp) {
-    arena_restore(anyarr_arena, *cp);
+    arena_restore(ARENA_CTX, *cp);
 }
 
 #define ARENA_TEMP __attribute__((cleanup(checkpoint_cleanup))) size_t
 
 
 static inline void auto_cleanup(void) {
-    if (anyarr_arena != NULL) {
-        arena_free(anyarr_arena);
-        anyarr_arena = NULL;
+    if (ARENA_CTX != nullptr) {
+        arena_free(ARENA_CTX);
+        ARENA_CTX = nullptr;
     }
 }
 
 static inline void auto_init(void) {
-    if (anyarr_arena != NULL) {
+    if (ARENA_CTX != nullptr) {
         return;
     }
     static const uint64_t WY1 = 0xe7037ed1a0b428dbull;
     arena_init(&anyarr_arena_instance);
-    anyarr_arena = &anyarr_arena_instance;
-    anyarr_arena->hash_seed = make_seed();
-    anyarr_arena->hash_seed_c1 = anyarr_arena->hash_seed ^ WY1;
+    ARENA_CTX = &anyarr_arena_instance;
+    ARENA_CTX->hash_seed = make_seed();
+    ARENA_CTX->hash_seed_c1 = ARENA_CTX->hash_seed ^ WY1;
     atexit(auto_cleanup);
 }
 
@@ -317,11 +334,11 @@ static inline void arena_cleanup(ARENA_NAMESPACE *ap) {
     }
 }
 
-#define ARENA_SCOPED __attribute__((cleanup(arena_cleanup))) ARENA_NAMESPACE = {0}
+#define ARENA_SCOPED __attribute__((cleanup(arena_cleanup))) ARENA_NAMESPACE
 
 
-typedef struct DynamicArray_ DynamicArray_;
-typedef struct HashMap_ HashMap_;
+typedef struct DynamicArray DynamicArray;
+typedef struct HashMap HashMap;
 typedef struct Blob Blob;
 
 typedef struct {
@@ -330,7 +347,7 @@ typedef struct {
             uint8_t type;
 
             union {
-                _Bool b;
+                bool b;
                 char c;
                 int64_t i;
                 uint64_t u;
@@ -339,8 +356,8 @@ typedef struct {
                 char *s;
                 Blob *l;
                 void *p;
-                DynamicArray_ *a;
-                HashMap_ *m;
+                DynamicArray *a;
+                HashMap *m;
             } data;
         };
 
@@ -359,7 +376,7 @@ typedef struct {
     };
 } ANY_NAMESPACE;
 
-struct DynamicArray_ {
+struct DynamicArray {
     ANY_NAMESPACE *data;
     size_t size;
     size_t capacity;
@@ -367,7 +384,7 @@ struct DynamicArray_ {
 
 #define CTRL_EMPTY 0xFF
 #define CTRL_DELETED 0xFE
-struct HashMap_ {
+struct HashMap {
     // By default, the fingerprint stores 0xFF, but it gets override by an actual fingerprint and when it gets deleted it again gets override to 0xFE making it act also as control byte
     uint8_t *fingerprint;
     char **key;
@@ -430,9 +447,9 @@ static inline ANY_NAMESPACE assign_double(const double d) {
 
 
 static inline ANY_NAMESPACE assign_string(const char *s) {
-    if (s == NULL) {
-        handle_error(ANYARR_ERR_NULLPTR);
-        return (ANY_NAMESPACE){ANYARR_ERR_NULLPTR};
+    if (s == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (ANY_NAMESPACE){ANYARR_ERR_TYPE_NULLPTR};
     }
     const size_t len = strlen(s);
     if (len < 15) {
@@ -441,16 +458,16 @@ static inline ANY_NAMESPACE assign_string(const char *s) {
         return val;
     }
     char *dup;
-    arena_alloc(anyarr_arena, len + 1, (void **) &dup);
+    arena_alloc(ARENA_CTX, len + 1, (void **) &dup);
     memcpy(dup, s, len + 1);
     return (ANY_NAMESPACE){.type = TYPE_STRING, .data.s = dup};
 }
 
 
 static inline ANY_NAMESPACE assign_blob(const Blob *l) {
-    if (l == NULL || l->ptr == NULL) {
-        handle_error(ANYARR_ERR_NULLPTR);
-        return (ANY_NAMESPACE){ANYARR_ERR_NULLPTR};
+    if (l == nullptr || l->ptr == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (ANY_NAMESPACE){ANYARR_ERR_TYPE_NULLPTR};
     }
     if (l->size < 15) {
         ANY_NAMESPACE val = {._type_sbo = TYPE_BLOB_SMALL, .len = l->size};
@@ -458,8 +475,8 @@ static inline ANY_NAMESPACE assign_blob(const Blob *l) {
         return val;
     }
     Blob *dup;
-    arena_alloc(anyarr_arena, sizeof(Blob), (void **) &dup);
-    arena_alloc(anyarr_arena, l->size, (void **) &dup->ptr);
+    arena_alloc(ARENA_CTX, sizeof(Blob), (void **) &dup);
+    arena_alloc(ARENA_CTX, l->size, (void **) &dup->ptr);
     memcpy(dup->ptr, l->ptr, l->size);
     dup->size = l->size;
     return (ANY_NAMESPACE){.type = TYPE_BLOB, .data.l = dup};
@@ -467,20 +484,20 @@ static inline ANY_NAMESPACE assign_blob(const Blob *l) {
 
 
 static inline ANY_NAMESPACE assign_ptr(void *p) {
-    if (p == NULL) {
-        handle_error(ANYARR_ERR_NULLPTR);
-        return (ANY_NAMESPACE){ANYARR_ERR_NULLPTR};
+    if (p == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (ANY_NAMESPACE){ANYARR_ERR_TYPE_NULLPTR};
     }
     return (ANY_NAMESPACE){TYPE_PTR, .data.p = p};
 }
 
 
-static inline anyarr_result array_init(DynamicArray_ *buf);
+static inline anyarr_result array_init(DynamicArray *buf);
 
-static inline ANY_NAMESPACE assign_array(DynamicArray_ *a) {
-    if (a == NULL) {
-        DynamicArray_ *heap_arr;
-        arena_alloc(anyarr_arena, sizeof(DynamicArray_), (void **) &heap_arr);
+static inline ANY_NAMESPACE assign_array(DynamicArray *a) {
+    if (a == nullptr) {
+        DynamicArray *heap_arr;
+        arena_alloc(ARENA_CTX, sizeof(DynamicArray), (void **) &heap_arr);
         array_init(heap_arr);
         return (ANY_NAMESPACE){TYPE_ARRAY, .data.a = heap_arr};
     }
@@ -488,12 +505,12 @@ static inline ANY_NAMESPACE assign_array(DynamicArray_ *a) {
 }
 
 
-static inline anyarr_result map_init(HashMap_ *m);
+static inline anyarr_result map_init(HashMap *m);
 
-static inline ANY_NAMESPACE assign_map(HashMap_ *m) {
-    if (m == NULL) {
-        HashMap_ *heap_map;
-        arena_alloc(anyarr_arena, sizeof(HashMap_), (void **) &heap_map);
+static inline ANY_NAMESPACE assign_map(HashMap *m) {
+    if (m == nullptr) {
+        HashMap *heap_map;
+        arena_alloc(ARENA_CTX, sizeof(HashMap), (void **) &heap_map);
         map_init(heap_map);
         return (ANY_NAMESPACE){TYPE_MAP, .data.m = heap_map};
     }
@@ -502,10 +519,10 @@ static inline ANY_NAMESPACE assign_map(HashMap_ *m) {
 
 
 static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, _Bool *out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_BOOL) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.b;
     return ANYARR_OK;
@@ -513,10 +530,10 @@ static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, _Bool *out_va
 
 
 static inline anyarr_result any_get_char(const ANY_NAMESPACE *val, char *out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_CHAR) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.c;
     return ANYARR_OK;
@@ -524,10 +541,10 @@ static inline anyarr_result any_get_char(const ANY_NAMESPACE *val, char *out_val
 
 
 static inline anyarr_result any_get_int(const ANY_NAMESPACE *val, int64_t *out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_INT) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.i;
     return ANYARR_OK;
@@ -535,10 +552,10 @@ static inline anyarr_result any_get_int(const ANY_NAMESPACE *val, int64_t *out_v
 
 
 static inline anyarr_result any_get_uint(const ANY_NAMESPACE *val, uint64_t *out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_UINT) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.u;
     return ANYARR_OK;
@@ -546,10 +563,10 @@ static inline anyarr_result any_get_uint(const ANY_NAMESPACE *val, uint64_t *out
 
 
 static inline anyarr_result any_get_float(const ANY_NAMESPACE *val, float *out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_FLOAT) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.f;
     return ANYARR_OK;
@@ -557,10 +574,10 @@ static inline anyarr_result any_get_float(const ANY_NAMESPACE *val, float *out_v
 
 
 static inline anyarr_result any_get_double(const ANY_NAMESPACE *val, double *out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_DOUBLE) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.d;
     return ANYARR_OK;
@@ -568,8 +585,8 @@ static inline anyarr_result any_get_double(const ANY_NAMESPACE *val, double *out
 
 
 static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char **out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if (val->type == TYPE_STRING) {
         *out_value = val->data.s;
@@ -578,13 +595,13 @@ static inline anyarr_result any_get_string(const ANY_NAMESPACE *val, const char 
         *out_value = val->small_buf;
         return ANYARR_OK;
     }
-    return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+    return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
 }
 
 
 static inline anyarr_result any_get_blob(const ANY_NAMESPACE *val, Blob *out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if (val->type == TYPE_BLOB) {
         out_value->ptr = val->data.l->ptr;
@@ -595,37 +612,37 @@ static inline anyarr_result any_get_blob(const ANY_NAMESPACE *val, Blob *out_val
         out_value->size = val->len;
         return ANYARR_OK;
     }
-    return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+    return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
 }
 
 
 static inline anyarr_result any_get_ptr(const ANY_NAMESPACE *val, void **out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_PTR) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.p;
     return ANYARR_OK;
 }
 
 
-static inline anyarr_result any_get_array(const ANY_NAMESPACE *val, DynamicArray_ **out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result any_get_array(const ANY_NAMESPACE *val, DynamicArray **out_value) {
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_ARRAY) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.a;
     return ANYARR_OK;
 }
 
 
-static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap_ **out_value) {
-    if (val == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap **out_value) {
+    if (val == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     } else if (val->type != TYPE_MAP) {
-        return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
     *out_value = val->data.m;
     return ANYARR_OK;
@@ -660,12 +677,20 @@ static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) 
 
         case TYPE_INT:
             INDENT();
+#ifdef ANYARR_PLATFORM_WINDOWS
             printf("int64_t: %lld\n", val->data.i);
+#else
+            printf("int_64_t: %ld\n", val->data.i);
+#endif
             return ANYARR_OK;
 
         case TYPE_UINT:
             INDENT();
+#ifdef ANYARR_PLATFORM_WINDOWS
             printf("uint64_t: %llu\n", val->data.u);
+#else
+            printf("uint64_t: %lu\n", val->data.u);
+#endif
             return ANYARR_OK;
 
         case TYPE_FLOAT:
@@ -745,7 +770,7 @@ static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) 
 
 #undef INDENT
         default:
-            return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+            return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
 }
 
@@ -764,10 +789,8 @@ static inline uint64_t map_hash(const char *key) {
     static const uint64_t WY1 = 0xe7037ed1a0b428dbull;
     size_t len = strlen(key);
     const uint8_t *p = (const uint8_t *)key;
-// I can't imagine how horrible AVX2 will be
 #ifdef __AVX512DQ__
-#include <immintrin.h>
-    __m512i seeds = _mm512_set1_epi64((int64_t)anyarr_arena->hash_seed_c1);
+    __m512i seeds = _mm512_set1_epi64((int64_t)ARENA_CTX->hash_seed_c1);
     const __m512i c0 = _mm512_set1_epi64((int64_t)WY0);
     for (; len >= 64; len -= 64, p += 64) {
         const __m512i chunk = _mm512_loadu_si512(p);
@@ -790,7 +813,41 @@ static inline uint64_t map_hash(const char *key) {
     const __m128i hi128 = _mm256_extracti128_si256(xor256, 1);
     const __m128i xor128 = _mm_xor_si128(lo128, hi128);
     uint64_t seed = (uint64_t)_mm_extract_epi64(xor128, 0) ^ (uint64_t)_mm_extract_epi64(xor128, 1);
+#elif defined(__AVX2__)
+    __m256i seeds = _mm256_set1_epi64x((int64_t)ARENA_CTX->hash_seed_c1);
+    const __m256i c0 = _mm256_set1_epi64x((int64_t)WY0);
+    for (; len >= 32; len -= 32, p += 32) {
+        const __m256i chunk = _mm256_loadu_si256((const __m256i *)p);
+        const __m256i a = _mm256_xor_si256(chunk, c0);
+        const __m256i lo_lo = _mm256_mul_epi32(a, seeds);
+        const __m256i a_hi = _mm256_srli_epi64(a, 32);
+        const __m256i seed_hi = _mm256_srli_epi64(seeds, 32);
+        const __m256i hi_lo = _mm256_mul_epu32(a_hi, seeds);
+        const __m256i lo_hi = _mm256_mul_epu32(a, seed_hi);
+        const __m256i cross = _mm256_slli_epi64(_mm256_add_epi64(hi_lo, lo_hi), 32);
+        const __m256i mul_64 = _mm256_add_epi64(lo_lo, cross);
+        seeds = _mm256_xor_si256(seeds, mul_64);
+    }
+    if (len > 0) {
+        uint8_t temp[32] = {0};
+        memcpy(temp, p, len);
+        const __m256i tail = _mm256_loadu_si256((const __m256i *)temp);
+        const __m256i a = _mm256_xor_si256(tail, c0);
+        const __m256i lo_lo = _mm256_mul_epi32(a, seeds);
+        const __m256i a_hi = _mm256_srli_epi64(a, 32);
+        const __m256i seed_hi = _mm256_srli_epi64(seeds, 32);
+        const __m256i hi_lo = _mm256_mul_epu32(a_hi, seeds);
+        const __m256i lo_hi = _mm256_mul_epu32(a, seed_hi);
+        const __m256i cross = _mm256_slli_epi64(_mm256_add_epi64(hi_lo, lo_hi), 32);
+        const __m256i mul_64 = _mm256_add_epi64(lo_lo, cross);
+        seeds = _mm256_xor_si256(seeds, mul_64);
+    }
+    const __m128i lo128 = _mm256_castsi256_si128(seeds);
+    const __m128i hi128 = _mm256_extracti128_si256(seeds, 1);
+    const __m128i xor128 = _mm_xor_si128(lo128, hi128);
+    uint64_t seed = (uint64_t)_mm_extract_epi64(xor128, 0) ^ (uint64_t)_mm_extract_epi64(xor128, 1);
 #else
+    __uint128_t seed = ARENA_CTX->hash_seed_c1;
     for (; len >= 8; len -= 8, p += 8) {
         uint64_t a = 0, b = 0;
         memcpy(&a, p, 4);
@@ -821,9 +878,6 @@ static inline uint64_t map_hash(const char *key) {
             a = 0;
             b = 0;
             break;
-        default:
-            fprintf(stderr, "[ANYARR] Unexpected case in map hashing."); // Just there to satisfy the ide complaining about missing default case
-            break;
     }
     const __uint128_t m = (__uint128_t)(a ^ WY0) * (b ^ WY1);
     seed ^= (uint64_t)(m) ^ (uint64_t)(m >> 64);
@@ -833,38 +887,38 @@ static inline uint64_t map_hash(const char *key) {
 }
 
 
-static inline anyarr_result array_init(DynamicArray_ *buf) {
-    if (buf == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result array_init(DynamicArray *buf) {
+    if (buf == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     buf->size = 0;
     buf->capacity = 4;
-    arena_alloc(anyarr_arena, buf->capacity * sizeof(ANY_NAMESPACE), (void **) &buf->data);
+    arena_alloc(ARENA_CTX, buf->capacity * sizeof(ANY_NAMESPACE), (void **) &buf->data);
     return ANYARR_OK;
 }
 
 
-static inline anyarr_result map_init(HashMap_ *m) {
-    if (m == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result map_init(HashMap *m) {
+    if (m == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     m->size = 0;
-    m->capacity = 16;
+    m->capacity = 64;
     m->tombstone = 0;
-    arena_alloc(anyarr_arena, m->capacity * sizeof(uint8_t), (void **) &m->fingerprint);
-    arena_alloc(anyarr_arena, m->capacity * sizeof(char *), (void **) &m->key);
-    arena_alloc(anyarr_arena, m->capacity * sizeof(ANY_NAMESPACE), (void **) &m->value);
+    arena_alloc(ARENA_CTX, m->capacity * sizeof(uint8_t), (void **) &m->fingerprint);
+    arena_alloc(ARENA_CTX, m->capacity * sizeof(char *), (void **) &m->key);
+    arena_alloc(ARENA_CTX, m->capacity * sizeof(ANY_NAMESPACE), (void **) &m->value);
     memset(m->fingerprint, CTRL_EMPTY, m->capacity);
     return ANYARR_OK;
 }
 
 
-static inline anyarr_result map_resize(HashMap_ *m);
+static inline anyarr_result map_resize(HashMap *m);
 
 
-static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAMESPACE **out_value) {
-    if (m == NULL || m->key == NULL || key == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+    if (m == nullptr || m->key == nullptr || key == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     const uint64_t hash = map_hash(key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;  // There's a 1/255 chance that the fingerprint itself can store 0xFF or 0xFE as value so we truncate the first bit so it never reaches that range
@@ -882,10 +936,11 @@ static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAME
         }
         const __m512i chunk = _mm512_maskz_loadu_epi8(load_mask, &m->fingerprint[index]);
         const __mmask64 non_empty = _mm512_mask_cmpneq_epi8_mask(load_mask, chunk, empty_vec);
+        const __mmask64 empty_mask   = _mm512_mask_cmpeq_epi8_mask(load_mask, chunk, empty_vec);
         const __mmask64 candidates = _mm512_mask_cmpeq_epi8_mask(non_empty, chunk, fingerprint_vec);
         uint64_t hits = (uint64_t)candidates;
         while (hits) {
-            const int slot = _tzcnt_u64(hits);
+            const uint64_t slot = _tzcnt_u64(hits);
             const size_t i = (index + slot) & (m->capacity - 1);
             if (strcmp(m->key[i], key) == 0) {
                 *out_value = &m->value[i];
@@ -893,16 +948,54 @@ static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAME
             }
             hits = _blsr_u64(hits);
         }
-        if (_kortestz_mask64_u8(non_empty, non_empty)) {
-            return handle_error(ANYARR_ERR_EMPTY);
+        size_t step = remaining;
+        if (remaining >= 64) {
+            step = 64;
         }
-        index = (index + 64) & (m->capacity - 1);
+        index = (index + step) & (m->capacity - 1);
+        if (empty_mask != 0) {
+            return handle_error(ANYARR_ERR_EMPTY, __LINE__, __FILE__);
+        }
+    }
+#elif defined(__AVX2__)
+    const __m256i fingerprint_vec = _mm256_set1_epi8((char)fingerprint);
+    const __m256i empty_vec = _mm256_set1_epi8((char)CTRL_EMPTY);
+    while (true) {
+        const size_t remaining = m->capacity - index;
+        const __m256i chunk = _mm256_loadu_si256((const __m256i *) &m->fingerprint[index]);
+        uint32_t load_mask;
+        if (remaining >= 32) {
+            load_mask = ~0U;
+        } else {
+            load_mask = (1U << remaining) - 1;
+        }
+        const uint32_t empty_bits = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, empty_vec)) & load_mask;
+        const uint32_t fp_bits = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, fingerprint_vec)) & load_mask;
+        const __mmask32 non_empty = load_mask & ~empty_bits;
+        uint32_t hits = fp_bits & non_empty;
+        while (hits) {
+            const uint64_t slot = _tzcnt_u32(hits);
+            const size_t i = (index + slot) & (m->capacity - 1);
+            if (strcmp(m->key[i], key) == 0) {
+                *out_value = &m->value[i];
+                return ANYARR_OK;
+            }
+            hits = _blsr_u32(hits);
+        }
+        size_t step = remaining;
+        if (remaining >= 32) {
+            step = 32;
+        }
+        index = (index + step) & (m->capacity - 1);
+        if (empty_bits != 0) {
+            return handle_error(ANYARR_ERR_EMPTY, __LINE__, __FILE__);
+        }
     }
 #else
     while (true) {
         const uint8_t ctrl = m->fingerprint[index];
         if (ctrl == CTRL_EMPTY) {
-            return handle_error(ANYARR_ERR_EMPTY);
+            return handle_error(ANYARR_ERR_EMPTY, __LINE__, __FILE__);
         }
         if (ctrl == fingerprint && strcmp(m->key[index], key) == 0) {
             *out_value = &m->value[index];
@@ -915,9 +1008,9 @@ static inline anyarr_result map_get(const HashMap_ *m, const char *key, ANY_NAME
 
 
 // Internal and only returns value instead of printing to stderr
-static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, ANY_NAMESPACE **out_value) {
-    if (m == NULL || m->key == NULL || key == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result map_get_silent(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+    if (m == nullptr || m->key == nullptr || key == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     const uint64_t hash = map_hash(key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;
@@ -935,10 +1028,11 @@ static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, A
         }
         const __m512i chunk = _mm512_maskz_loadu_epi8(load_mask, &m->fingerprint[index]);
         const __mmask64 non_empty = _mm512_mask_cmpneq_epi8_mask(load_mask, chunk, empty_vec);
+        const __mmask64 empty_mask   = _mm512_mask_cmpeq_epi8_mask(load_mask, chunk, empty_vec);
         const __mmask64 candidates = _mm512_mask_cmpeq_epi8_mask(non_empty, chunk, fingerprint_vec);
         uint64_t hits = (uint64_t)candidates;
         while (hits) {
-            const int slot = _tzcnt_u64(hits);
+            const uint64_t slot = _tzcnt_u64(hits);
             const size_t i = (index + slot) & (m->capacity - 1);
             if (strcmp(m->key[i], key) == 0) {
                 *out_value = &m->value[i];
@@ -946,10 +1040,48 @@ static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, A
             }
             hits = _blsr_u64(hits);
         }
-        if (_kortestz_mask64_u8(non_empty, non_empty)) {
-            return handle_error(ANYARR_ERR_EMPTY);
+        size_t step = remaining;
+        if (remaining >= 64) {
+            step = 64;
         }
-        index = (index + 64) & (m->capacity - 1);
+        index = (index + step) & (m->capacity - 1);
+        if (empty_mask != 0) {
+            return ANYARR_ERR_EMPTY;
+        }
+    }
+#elif defined(__AVX2__)
+    const __m256i fingerprint_vec = _mm256_set1_epi8((char)fingerprint);
+    const __m256i empty_vec = _mm256_set1_epi8((char)CTRL_EMPTY);
+    while (true) {
+        const size_t remaining = m->capacity - index;
+        const __m256i chunk = _mm256_loadu_si256((const __m256i *) &m->fingerprint[index]);
+        uint32_t load_mask;
+        if (remaining >= 32) {
+            load_mask = ~0U;
+        } else {
+            load_mask = (1U << remaining) - 1;
+        }
+        const uint32_t empty_bits = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, empty_vec)) & load_mask;
+        const uint32_t fp_bits = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, fingerprint_vec)) & load_mask;
+        const __mmask32 non_empty = load_mask & ~empty_bits;
+        uint32_t hits = fp_bits & non_empty;
+        while (hits) {
+            const uint64_t slot = _tzcnt_u32(hits);
+            const size_t i = (index + slot) & (m->capacity - 1);
+            if (strcmp(m->key[i], key) == 0) {
+                *out_value = &m->value[i];
+                return ANYARR_OK;
+            }
+            hits = _blsr_u32(hits);
+        }
+        size_t step = remaining;
+        if (remaining >= 32) {
+            step = 32;
+        }
+        index = (index + step) & (m->capacity - 1);
+        if (empty_bits != 0) {
+            return ANYARR_ERR_EMPTY;
+        }
     }
 #else
     while (true) {
@@ -967,14 +1099,9 @@ static inline anyarr_result map_get_silent(const HashMap_ *m, const char *key, A
 }
 
 
-static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY_NAMESPACE value) {
-    if (m == NULL || m->key == NULL || key == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
-    }
-    ANY_NAMESPACE *existing;
-    if (map_get_silent(m, key, &existing) == ANYARR_OK) {
-        *existing = value;
-        return ANYARR_OK;
+static inline anyarr_result map_put_impl(HashMap *m, const char *key, const ANY_NAMESPACE value) {
+    if (m == nullptr || m->key == nullptr || key == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if ((m->size + m->tombstone + 1) * 4 >= m->capacity * 3) {
         map_resize(m);
@@ -983,7 +1110,7 @@ static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;
     const size_t key_len = strlen(key);
     char *current_key;
-    arena_alloc(anyarr_arena, key_len + 1, (void **) &current_key);
+    arena_alloc(ARENA_CTX, key_len + 1, (void **) &current_key);
     memcpy(current_key, key, key_len + 1);
     size_t index = hash & (m->capacity - 1);
     while (true) {
@@ -1003,7 +1130,34 @@ static inline anyarr_result map_put_impl(HashMap_ *m, const char *key, const ANY
 #define map_put(m, key, value) map_put_impl(m, key, assign_any(value))
 
 
-static inline anyarr_result map_resize(HashMap_ *m) {
+static inline void resize_memset(uint8_t *out, size_t count) {
+#ifdef __AVX512DQ__
+    const __m512i empty_vec = _mm512_set1_epi8((char)CTRL_EMPTY);
+    const uint8_t *end = out + count;
+    while ((uintptr_t)out & 63) *out++ = CTRL_EMPTY;
+    while (out + 64 <= end) {
+        _mm512_stream_si512((__m512i *)out, empty_vec);
+        out += 64;
+    }
+    while (out < end) *out++ = CTRL_EMPTY;
+    _mm_sfence();
+#elif defined(__AVX2__)
+    const __m256i empty_vec = _mm256_set1_epi8((char)CTRL_EMPTY);
+    uint8_t *end = out + count;
+    while ((uintptr_t)out & 31) *out++ = CTRL_EMPTY;
+    while (out + 32 <= end) {
+        _mm256_stream_si256((__m256i *)out, empty_vec);
+        out += 32;
+    }
+    while (out < end) *out++ = CTRL_EMPTY;
+    _mm_sfence();
+#else
+    memset(out, CTRL_EMPTY, count);
+#endif
+}
+
+
+static inline anyarr_result map_resize(HashMap *m) {
     const uint8_t *old_fingerprint = m->fingerprint;
     char **old_key = m->key;
     const ANY_NAMESPACE *old_value = m->value;
@@ -1012,19 +1166,87 @@ static inline anyarr_result map_resize(HashMap_ *m) {
     if (m->size * 2 >= old_capacity) {
         new_capacity = old_capacity << 1;
     }
-    uint8_t *new_fingerprint = NULL;
-    char **new_key = NULL;
-    ANY_NAMESPACE *new_value = NULL;
-    arena_alloc(anyarr_arena, new_capacity * sizeof(uint8_t), (void **) &new_fingerprint);
-    arena_alloc(anyarr_arena, new_capacity * sizeof(char *), (void **) &new_key);
-    arena_alloc(anyarr_arena, new_capacity * sizeof(ANY_NAMESPACE), (void **) &new_value);
-    memset(new_fingerprint, CTRL_EMPTY, new_capacity);
+    uint8_t *new_fingerprint = nullptr;
+    char **new_key = nullptr;
+    ANY_NAMESPACE *new_value = nullptr;
+    arena_alloc(ARENA_CTX, new_capacity * sizeof(uint8_t), (void **) &new_fingerprint);
+    arena_alloc(ARENA_CTX, new_capacity * sizeof(char *), (void **) &new_key);
+    arena_alloc(ARENA_CTX, new_capacity * sizeof(ANY_NAMESPACE), (void **) &new_value);
+    resize_memset(new_fingerprint, new_capacity);
     m->fingerprint = new_fingerprint;
     m->key = new_key;
     m->value = new_value;
     m->capacity = new_capacity;
     m->size = 0;
     m->tombstone = 0;
+#ifdef __AVX512DQ__
+    const __m512i top_bit_vec = _mm512_set1_epi8((char)0x80);
+    for (size_t i = 0; i < old_capacity; ) {
+        const size_t remaining = old_capacity - i;
+        __mmask64 load_mask;
+        if (remaining >= 64) {
+            load_mask = ~0ULL;
+        } else {
+            load_mask = (1ULL << remaining) - 1;
+        }
+        const __m512i chunk = _mm512_maskz_loadu_epi8(load_mask, old_fingerprint + i);
+        const __m512i top_bits = _mm512_and_si512(chunk, top_bit_vec);
+        const __mmask64 dead_bits = _mm512_mask_cmpeq_epi8_mask(load_mask, top_bits, top_bit_vec);
+        uint64_t live_bits = (uint64_t)(load_mask & ~dead_bits);
+        while (live_bits) {
+            const uint64_t slot = _tzcnt_u64(live_bits);
+            const size_t old_i = i + slot;
+            size_t index = map_hash(old_key[old_i]) & (m->capacity - 1);
+            while (m->fingerprint[index] != CTRL_EMPTY) {
+                index = (index + 1) & (m->capacity - 1);
+            }
+            m->key[index] = old_key[old_i];
+            m->value[index] = old_value[old_i];
+            m->fingerprint[index] = old_fingerprint[old_i];
+            m->size++;
+            live_bits = _blsr_u64(live_bits);
+        }
+        if (remaining >= 64) {
+            i += 64;
+        } else {
+            i += remaining;
+        }
+    }
+#elif defined(__AVX2__)
+    const __m256i top_bit_vec = _mm256_set1_epi8((char)0x80);
+    for (size_t i = 0; i < old_capacity; ) {
+        const size_t remaining = old_capacity - i;
+        uint32_t load_mask;
+        if (remaining >= 32) {
+            load_mask = ~0U;
+        } else {
+            load_mask = (1U << remaining) - 1;
+        }
+        const __m256i chunk = _mm256_loadu_si256((const __m256i *)(old_fingerprint + i));
+        const __m256i top_bits = _mm256_and_si256(chunk, top_bit_vec);
+        const __m256i is_dead = _mm256_cmpeq_epi8(top_bits, top_bit_vec);
+        uint32_t dead_bits = (uint32_t)_mm256_movemask_epi8(is_dead) | ~load_mask;
+        uint32_t live_bits = ~dead_bits;
+        while (live_bits) {
+            const uint64_t slot = _tzcnt_u32(live_bits);
+            const size_t old_i = i + slot;
+            size_t index = map_hash(old_key[old_i]) & (m->capacity - 1);
+            while (m->fingerprint[index] != CTRL_EMPTY) {
+                index = (index + 1) & (m->capacity - 1);
+            }
+            m->key[index] = old_key[old_i];
+            m->value[index] = old_value[old_i];
+            m->fingerprint[index] = old_fingerprint[old_i];
+            m->size++;
+            live_bits = _blsr_u32(live_bits);
+        }
+        if (remaining >= 32) {
+            i += 32;
+        } else {
+            i += remaining;
+        }
+    }
+#else
     for (size_t i = 0; i < old_capacity; i++) {
         const uint8_t ctrl = old_fingerprint[i];
         if (ctrl < 0x80) {
@@ -1038,21 +1260,96 @@ static inline anyarr_result map_resize(HashMap_ *m) {
             m->size++;
         }
     }
+#endif
     return ANYARR_OK;
 }
 
 
-static inline anyarr_result map_remove(HashMap_ *m, const char *key) {
-    if (m == NULL || m->key == NULL || key == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result map_remove(HashMap *m, const char *key) {
+    if (m == nullptr || m->key == nullptr || key == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     const uint64_t hash = map_hash(key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;
     size_t index = hash & (m->capacity - 1);
+#ifdef __AVX512DQ__
+    const __m512i fingerprint_vec = _mm512_set1_epi8((char)fingerprint);
+    const __m512i empty_vec = _mm512_set1_epi8((char)CTRL_EMPTY);
+    while (true) {
+        const size_t remaining = m->capacity - index;
+        __mmask64 load_mask;
+        if (remaining >= 64) {
+            load_mask = ~0ULL;
+        } else {
+            load_mask = (1ULL << remaining) - 1;
+        }
+        const __m512i chunk = _mm512_maskz_loadu_epi8(load_mask, &m->fingerprint[index]);
+        const __mmask64 empties = _mm512_mask_cmpeq_epi8_mask(load_mask, chunk, empty_vec);
+        const __mmask64 non_empty = load_mask & ~empties;
+        const __mmask64 candidates = _mm512_mask_cmpeq_epi8_mask(non_empty, chunk, fingerprint_vec);
+        uint64_t hits = (uint64_t)candidates;
+        while (hits) {
+            const uint64_t slot = _tzcnt_u64(hits);
+            const size_t i = (index + slot) & (m->capacity - 1);
+            if (strcmp(m->key[i], key) == 0) {
+                m->fingerprint[i] = CTRL_DELETED;
+                m->size--;
+                m->tombstone++;
+                return ANYARR_OK;
+            }
+            hits = _blsr_u64(hits);
+        }
+        size_t step = remaining;
+        if (remaining >= 64) {
+            step = 64;
+        }
+        index = (index + step) & (m->capacity - 1);
+        if (empties != 0) {
+            return handle_error(ANYARR_ERR_EMPTY, __LINE__, __FILE__);
+        }
+    }
+#elif defined(__AVX2__)
+    const __m256i fingerprint_vec = _mm256_set1_epi8((char)fingerprint);
+    const __m256i empty_vec = _mm256_set1_epi8((char)CTRL_EMPTY);
+    while (true) {
+        const size_t remaining = m->capacity - index;
+        uint32_t load_mask;
+        if (remaining >= 32) {
+            load_mask = ~0U;
+        } else {
+            load_mask = (1U << remaining) - 1;
+        }
+        const __m256i chunk = _mm256_loadu_si256((const __m256i *)&m->fingerprint[index]);
+        const uint32_t empties = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, empty_vec)) & load_mask;
+        const uint32_t fp_bits = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, fingerprint_vec)) & load_mask;
+        uint32_t hits = fp_bits & ~empties;
+        while (hits) {
+            const uint64_t slot = _tzcnt_u32(hits);
+            const size_t i = (index + slot) & (m->capacity - 1);
+            if (strcmp(m->key[i], key) == 0) {
+                m->fingerprint[i] = CTRL_DELETED;
+                m->size--;
+                m->tombstone++;
+                return ANYARR_OK;
+            }
+            hits = _blsr_u32(hits);
+        }
+        if (empties != 0) {
+            return handle_error(ANYARR_ERR_EMPTY, __LINE__, __FILE__);
+        }
+        size_t step;
+        if (remaining >= 32) {
+            step = 32;
+        } else {
+            step = remaining;
+        }
+        index = (index + step) & (m->capacity - 1);
+    }
+#else
     while (true) {
         const uint8_t ctrl = m->fingerprint[index];
         if (ctrl == CTRL_EMPTY) {
-            return handle_error(ANYARR_ERR_EMPTY);
+            return handle_error(ANYARR_ERR_EMPTY, __LINE__, __FILE__);
         }
         if (ctrl == fingerprint && strcmp(m->key[index], key) == 0) {
             m->fingerprint[index] = CTRL_DELETED;
@@ -1062,12 +1359,56 @@ static inline anyarr_result map_remove(HashMap_ *m, const char *key) {
         }
         index = (index + 1) & (m->capacity - 1);
     }
+#endif
 }
 
 
-static inline anyarr_result array_append_impl(DynamicArray_ *buf, const ANY_NAMESPACE value) {
-    if (buf == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline void array_copy(ANY_NAMESPACE *out, ANY_NAMESPACE *in, const size_t count) {
+    const size_t bytes = count * sizeof(ANY_NAMESPACE);
+    if (bytes < ANYARR_L2_SIZE) { // Optimization, change macro value depending on targeted cpu
+        memcpy(out, in, bytes);
+        return;
+    }
+#ifdef __AVX512DQ__
+    const ANY_NAMESPACE *end = in + count;
+    while ((uintptr_t)in & 63) {
+        *out = *in++;
+    }
+    while (in + 4 <= end) {
+        __builtin_prefetch(in + ANYARR_PREFETCH_DISTANCE * 4, 0, 0);
+        const __m512i chunk = _mm512_loadu_si512(in);
+        _mm512_stream_si512((__m512i *)out, chunk);
+        out += 4;
+        in += 4;
+    }
+    while (in < end) {
+        *out++ = *in++;
+    }
+    _mm_sfence();
+#elif defined(__AVX2__)
+    const ANY_NAMESPACE *end = in + count;
+    while ((uintptr_t)in & 31) {
+        *out = *in++;
+    }
+    while (in + 2 <= end) {
+        __builtin_prefetch(in + ANYARR_PREFETCH_DISTANCE * 2, 0, 0);
+        const __m256i chunk = _mm256_loadu_si256((__m256i *)in);
+        _mm256_stream_si256((__m256i *)out, chunk);
+        out += 2;
+        in += 2;
+    }
+    if (in < end) {
+        *out = *in;
+    }
+    _mm_sfence();
+#else
+    memcpy(out, in, bytes);
+#endif
+}
+
+static inline anyarr_result array_append_impl(DynamicArray *buf, const ANY_NAMESPACE value) {
+    if (buf == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if (buf->size == buf->capacity) {
         size_t new_capacity = 4;
@@ -1076,23 +1417,23 @@ static inline anyarr_result array_append_impl(DynamicArray_ *buf, const ANY_NAME
         }
         const size_t old_bytes = arena_align_up(buf->capacity * sizeof(ANY_NAMESPACE));
         const size_t new_bytes = arena_align_up(new_capacity * sizeof(ANY_NAMESPACE));
-        const _Bool at_tip = (buf->data != NULL) && ((uint8_t *) buf->data + old_bytes == anyarr_arena->base + anyarr_arena->used);
+        const _Bool at_tip = (buf->data != nullptr) && ((uint8_t *) buf->data + old_bytes == ARENA_CTX->base + ARENA_CTX->used);
         if (at_tip) {
             const size_t extra = new_bytes - old_bytes;
-            const size_t new_used = anyarr_arena->used + extra;
-            if (new_used > anyarr_arena->reserved) {
-                return handle_error(ANYARR_ERR_OOM);
+            const size_t new_used = ARENA_CTX->used + extra;
+            if (new_used > ARENA_CTX->reserved) {
+                return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
             }
-            if (new_used > anyarr_arena->committed) {
-                arena_commit(anyarr_arena, new_used - anyarr_arena->committed);
+            if (new_used > ARENA_CTX->committed) {
+                arena_commit(ARENA_CTX, new_used - ARENA_CTX->committed);
             }
-            anyarr_arena->used = new_used;
+            ARENA_CTX->used = new_used;
             buf->capacity = new_capacity;
         } else {
             ANY_NAMESPACE *temp;
-            arena_alloc(anyarr_arena, new_capacity * sizeof(ANY_NAMESPACE), (void **) &temp);
+            arena_alloc(ARENA_CTX, new_capacity * sizeof(ANY_NAMESPACE), (void **) &temp);
             if (buf->size > 0) {
-                memcpy(temp, buf->data, buf->size * sizeof(ANY_NAMESPACE));
+                array_copy(temp, buf->data, buf->size);
             }
             buf->data = temp;
             buf->capacity = new_capacity;
@@ -1104,12 +1445,12 @@ static inline anyarr_result array_append_impl(DynamicArray_ *buf, const ANY_NAME
 #define array_append(buf, value) array_append_impl(buf, assign_any(value))
 
 
-static inline anyarr_result array_remove_index(DynamicArray_ *buf, const size_t index) {
-    if (buf == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result array_remove_index(DynamicArray *buf, const size_t index) {
+    if (buf == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if (index >= buf->size) {
-        return handle_error(ANYARR_ERR_OUT_OF_BOUNDS);
+        return handle_error(ANYARR_ERR_OUT_OF_BOUNDS, __LINE__, __FILE__);
     }
     const size_t index_queue = buf->size - index - 1;
     if (index_queue > 0) {
@@ -1120,12 +1461,12 @@ static inline anyarr_result array_remove_index(DynamicArray_ *buf, const size_t 
 }
 
 
-static inline anyarr_result array_set_index_impl(const DynamicArray_ *buf, const size_t index, const ANY_NAMESPACE value) {
-    if (buf == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result array_set_index_impl(const DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
+    if (buf == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if (index >= buf->size) {
-        return handle_error(ANYARR_ERR_OUT_OF_BOUNDS);
+        return handle_error(ANYARR_ERR_OUT_OF_BOUNDS, __LINE__, __FILE__);
     }
     buf->data[index] = value;
     return ANYARR_OK;
@@ -1133,12 +1474,12 @@ static inline anyarr_result array_set_index_impl(const DynamicArray_ *buf, const
 #define array_set_index(buf, index, value) array_set_index_impl(buf, index, assign_any(value))
 
 
-static inline anyarr_result array_get(const DynamicArray_ *buf, const size_t index, ANY_NAMESPACE **out_value) {
-    if (buf == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result array_get(const DynamicArray *buf, const size_t index, ANY_NAMESPACE **out_value) {
+    if (buf == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if (index >= buf->size) {
-        return handle_error(ANYARR_ERR_OUT_OF_BOUNDS);
+        return handle_error(ANYARR_ERR_OUT_OF_BOUNDS, __LINE__, __FILE__);
     }
 
     *out_value = &buf->data[index];
@@ -1147,8 +1488,8 @@ static inline anyarr_result array_get(const DynamicArray_ *buf, const size_t ind
 
 
 static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, ANY_NAMESPACE **out_value) {
-    if (root == NULL || path == NULL || out_value == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (root == nullptr || path == nullptr || out_value == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     ANY_NAMESPACE *current = root;
     const char *p = path;
@@ -1163,7 +1504,7 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
         size_t i = 0;
         while (*p != '\0' && *p != '.' && *p != '[' && *p != ']') {
             if (i >= sizeof(segment) - 1) {
-                return handle_error(ANYARR_ERR_OUT_OF_BOUNDS);
+                return handle_error(ANYARR_ERR_OUT_OF_BOUNDS, __LINE__, __FILE__);
             }
             segment[i++] = *p++;
         }
@@ -1171,20 +1512,20 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
         if (current->type == TYPE_MAP) {
             const anyarr_result r = map_get_silent(current->data.m, segment, &current);
             if (r != ANYARR_OK) {
-                return handle_error(r);
+                return handle_error(r, __LINE__, __FILE__);
             }
         } else if (current->type == TYPE_ARRAY) {
             char *end_ptr;
             const size_t index = strtoull(segment, &end_ptr, 10);
             if (*end_ptr != '\0') {
-                return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+                return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
             }
             const anyarr_result r = array_get(current->data.a, index, &current);
             if (r != ANYARR_OK) {
                 return r;
             }
         } else {
-            return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+            return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
         }
     }
     *out_value = current;
@@ -1192,16 +1533,16 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
 }
 
 
-static inline anyarr_result array_reserve(DynamicArray_ *buf, const size_t new_capacity) {
-    if (buf == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result array_reserve(DynamicArray *buf, const size_t new_capacity) {
+    if (buf == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if (new_capacity <= buf->capacity) {
         return ANYARR_OK;
     }
     ANY_NAMESPACE *temp;
-    arena_alloc(anyarr_arena, new_capacity * sizeof(ANY_NAMESPACE), (void **) &temp);
-    if (buf->size > 0 && buf->data != NULL) {
+    arena_alloc(ARENA_CTX, new_capacity * sizeof(ANY_NAMESPACE), (void **) &temp);
+    if (buf->size > 0 && buf->data != nullptr) {
         memcpy(temp, buf->data, buf->size * sizeof(ANY_NAMESPACE));
     }
     buf->data = temp;
@@ -1211,8 +1552,8 @@ static inline anyarr_result array_reserve(DynamicArray_ *buf, const size_t new_c
 
 
 static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *dest) {
-    if (src == NULL || dest == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (src == nullptr || dest == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     switch (src->type) {
         case TYPE_NULL:
@@ -1230,9 +1571,9 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
             *dest = assign_string(src->data.s);
             return ANYARR_OK;
         case TYPE_ARRAY: {
-            const DynamicArray_ *src_arr = src->data.a;
-            DynamicArray_ *new_arr;
-            arena_alloc(anyarr_arena, sizeof(DynamicArray_), (void **) &new_arr);
+            const DynamicArray *src_arr = src->data.a;
+            DynamicArray *new_arr;
+            arena_alloc(ARENA_CTX, sizeof(DynamicArray), (void **) &new_arr);
             array_init(new_arr);
             for (size_t i = 0; i < src_arr->size; i++) {
                 ANY_NAMESPACE cloned_elem;
@@ -1255,9 +1596,9 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
             return ANYARR_OK;
         }
         case TYPE_MAP: {
-            const HashMap_ *src_map = src->data.m;
-            HashMap_ *new_map;
-            arena_alloc(anyarr_arena, sizeof(HashMap_), (void **) &new_map);
+            const HashMap *src_map = src->data.m;
+            HashMap *new_map;
+            arena_alloc(ARENA_CTX, sizeof(HashMap), (void **) &new_map);
             map_init(new_map);
             for (size_t i = 0; i < src_map->capacity; i++) {
                 const uint8_t ctrl = src_map->fingerprint[i];
@@ -1277,13 +1618,13 @@ static inline anyarr_result any_clone(const ANY_NAMESPACE *src, ANY_NAMESPACE *d
         default:
             break;
     }
-    return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+    return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
 }
 
 
 static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPACE *b) {
-    if (a == NULL || b == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+    if (a == nullptr || b == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if ((a->type == TYPE_STRING || a->type == TYPE_STRING_SMALL) && (
             b->type == TYPE_STRING || b->type == TYPE_STRING_SMALL)) {
@@ -1353,8 +1694,8 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
             }
             return ANYARR_NOT_EQUAL;
         case TYPE_ARRAY: {
-            const DynamicArray_ *aa = a->data.a;
-            const DynamicArray_ *ab = b->data.a;
+            const DynamicArray *aa = a->data.a;
+            const DynamicArray *ab = b->data.a;
             if (aa->size != ab->size) {
                 return ANYARR_NOT_EQUAL;
             }
@@ -1367,8 +1708,8 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
             return ANYARR_EQUAL;
         }
         case TYPE_MAP: {
-            const HashMap_ *ma = a->data.m;
-            const HashMap_ *mb = b->data.m;
+            const HashMap *ma = a->data.m;
+            const HashMap *mb = b->data.m;
             if (ma->size != mb->size) {
                 return ANYARR_NOT_EQUAL;
             }
@@ -1389,40 +1730,40 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
             return ANYARR_EQUAL;
         }
         default:
-            return handle_error(ANYARR_ERR_TYPE_MISMATCH);
+            return handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
     }
 }
 
 
-static inline anyarr_result array_pop(DynamicArray_ *buf) {
-    if (buf == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result array_pop(DynamicArray *buf) {
+    if (buf == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     if (buf->size == 0) {
-        return handle_error(ANYARR_ERR_EMPTY);
+        return handle_error(ANYARR_ERR_EMPTY, __LINE__, __FILE__);
     }
     buf->size--;
     return ANYARR_OK;
 }
 
 
-static inline anyarr_result array_clear(DynamicArray_ *buf) {
-    if (buf == NULL) {
-        return handle_error(ANYARR_ERR_NULLPTR);
+static inline anyarr_result array_clear(DynamicArray *buf) {
+    if (buf == nullptr) {
+        return handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
     }
     buf->size = 0;
     return ANYARR_OK;
 }
 
 
-static inline const ANY_NAMESPACE *array_at(const DynamicArray_ *buf, size_t idx) {
-    if (buf == NULL) {
-        handle_error(ANYARR_ERR_NULLPTR);
-        return NULL;
+static inline const ANY_NAMESPACE *array_at(const DynamicArray *buf, size_t idx) {
+    if (buf == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return nullptr;
     }
     if (idx >= buf->size) {
-        handle_error(ANYARR_ERR_OUT_OF_BOUNDS);
-        return NULL;
+        handle_error(ANYARR_ERR_OUT_OF_BOUNDS, __LINE__, __FILE__);
+        return nullptr;
     }
     return &buf->data[idx];
 }
@@ -1430,7 +1771,7 @@ static inline const ANY_NAMESPACE *array_at(const DynamicArray_ *buf, size_t idx
 
 static inline AnyIter any_iter(const ANY_NAMESPACE *root) {
     AnyIter it = {0};
-    if (root == NULL) {
+    if (root == nullptr) {
         return it;
     }
     if (root->type == TYPE_ARRAY) {
@@ -1453,7 +1794,7 @@ static inline ANY_NAMESPACE *any_iter_next(AnyIter *it) {
         if (it->index < it->bound) {
             return &it->data[it->index++];
         }
-        return NULL;
+        return nullptr;
     }
 
     if (it->type == TYPE_MAP) {
@@ -1466,9 +1807,9 @@ static inline ANY_NAMESPACE *any_iter_next(AnyIter *it) {
             it->last_key = it->key[it->index];
             return &it->value[it->index++];
         }
-        return NULL;
+        return nullptr;
     }
-    return NULL;
+    return nullptr;
 }
 
 
@@ -1484,12 +1825,12 @@ static inline AnyWalker any_walker(const ANY_NAMESPACE *root, const int max_dept
     AnyWalker walk = {0};
     walk.depth = -1;
     walk.max_depth = max_depth;
-    if (root == NULL) {
-        handle_error(ANYARR_ERR_NULLPTR);
+    if (root == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
         return walk;
     }
     if (root->type != TYPE_ARRAY && root->type != TYPE_MAP) {
-        handle_error(ANYARR_ERR_TYPE_MISMATCH);
+        handle_error(ANYARR_ERR_TYPE_MISMATCH, __LINE__, __FILE__);
         return walk;
     }
     walk.stack[0] = any_iter(root);
@@ -1500,36 +1841,36 @@ static inline AnyWalker any_walker(const ANY_NAMESPACE *root, const int max_dept
 
 
 static inline const char *any_walker_key(const AnyWalker *walk) {
-    if (walk == NULL) {
-        handle_error(ANYARR_ERR_NULLPTR);
-        return NULL;
+    if (walk == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return nullptr;
     }
     if (walk->result != ANYARR_OK) {
-        handle_error(walk->result);
-        return NULL;
+        handle_error(walk->result, __LINE__, __FILE__);
+        return nullptr;
     }
     if (walk->depth < 0) {
-        return NULL;
+        return nullptr;
     }
     return walk->stack[walk->depth].last_key;
 }
 
 
 static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
-    if (walk == NULL) {
-        handle_error(ANYARR_ERR_NULLPTR);
-        return NULL;
+    if (walk == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return nullptr;
     }
     if (walk->result != ANYARR_OK) {
-        handle_error(walk->result);
-        return NULL;
+        handle_error(walk->result, __LINE__, __FILE__);
+        return nullptr;
     }
     if (walk->depth < 0) {
-        return NULL;
+        return nullptr;
     }
     while (walk->depth >= 0) {
         ANY_NAMESPACE *val = any_iter_next(&walk->stack[walk->depth]);
-        if (val == NULL) {
+        if (val == nullptr) {
             walk->depth--;
             continue;
         }
@@ -1544,13 +1885,13 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
         }
         if (next_depth >= ANYARR_WALKER_DEPTH) {
             walk->result = ANYARR_ERR_OUT_OF_BOUNDS;
-            handle_error(ANYARR_ERR_OUT_OF_BOUNDS);
-            return NULL;
+            handle_error(ANYARR_ERR_OUT_OF_BOUNDS, __LINE__, __FILE__);
+            return nullptr;
         }
         walk->stack[next_depth] = any_iter(val);
         walk->depth = next_depth;
     }
-    return NULL;
+    return nullptr;
 }
 
 
@@ -1573,8 +1914,8 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
     char*: assign_string,           \
     const char*: assign_string,     \
     Blob*: assign_blob,             \
-    DynamicArray_*: assign_array,   \
-    HashMap_*: assign_map,          \
+    DynamicArray*: assign_array,    \
+    HashMap*: assign_map,           \
     default: assign_ptr             \
 )(x)
 
@@ -1587,35 +1928,35 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
     double*: any_get_double,                            \
     const char**: any_get_string,                       \
     Blob*: any_get_blob,                                \
-    DynamicArray_**: any_get_array,                     \
-    HashMap_**: any_get_map,                            \
+    DynamicArray**: any_get_array,                      \
+    HashMap**: any_get_map,                             \
     void**: any_get_ptr                                 \
 )(val_ptr, out_ptr)
 
 // This is where it gets messy, it's a hacky macro which takes in the struct and uses the _Generic to assign DynamicArray and HashMap structure and iterates any_get_path
 #define path_get(root, path, out_ptr)                                      \
 get_any(({                                                                 \
-    ANY_NAMESPACE *_v = NULL;                                              \
+    ANY_NAMESPACE *_v = nullptr;                                           \
     ANY_NAMESPACE _tmp;                                                    \
     ANY_NAMESPACE *_root = _Generic((root),                                \
     ANY_NAMESPACE*: (root),                                                \
-    DynamicArray_*: (_tmp = assign_array((DynamicArray_*)(root)), &_tmp),  \
-    HashMap_*: (_tmp = assign_map((HashMap_*)(root)), &_tmp)               \
-);                                                                         \
+    DynamicArray*: (_tmp = assign_array((DynamicArray*)(root)), &_tmp),    \
+    HashMap*: (_tmp = assign_map((HashMap*)(root)), &_tmp)                 \
+),                                                                         \
 any_get_path(_root, (path), &_v);                                          \
 _v;                                                                        \
 }), (out_ptr))
 
 // Internal macro to handle iteration of HashMap and DynamicArray
-#define _any_iter_generic(root_ptr) _Generic((root_ptr),                                            \
-    ANY_NAMESPACE*: any_iter((ANY_NAMESPACE*)(root_ptr)),                                           \
-    DynamicArray_*: any_iter(&(ANY_NAMESPACE){TYPE_ARRAY, .data.a = (DynamicArray_*)(root_ptr)}),   \
-    HashMap_*: any_iter(&(ANY_NAMESPACE){TYPE_MAP,   .data.m = (HashMap_*)(root_ptr)})              \
+#define _any_iter_generic(root_ptr) _Generic((root_ptr),                                          \
+    ANY_NAMESPACE*: any_iter((ANY_NAMESPACE*)(root_ptr)),                                         \
+    DynamicArray*: any_iter(&(ANY_NAMESPACE){TYPE_ARRAY, .data.a = (DynamicArray*)(root_ptr)}),   \
+    HashMap*: any_iter(&(ANY_NAMESPACE){TYPE_MAP,   .data.m = (HashMap*)(root_ptr)})              \
 )
 
 #define foreach(item, root_ptr)                                          \
     for (AnyIter _it = _any_iter_generic(root_ptr);                      \
-    (item = any_iter_next(&_it)) != NULL; )
+    (item = any_iter_next(&_it)) != nullptr; )
 
 #define foreach_kv(key, item, root_ptr)                                  \
     for (AnyIter _it = _any_iter_generic(root_ptr);                      \
