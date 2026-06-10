@@ -29,10 +29,9 @@
 #  endif
 #endif
 
-/*TO DO:
- * SIMD: x86 AVX512, AVX2 and ARM64 NEON (Apple doesn't support SVE)
- * NumArray: typed SIMD array (double), Int64Array (int64_t exact integers) but the priority is the double array and let it also convert integers into double
- * _Thread_local arenas with a thread pool
+/*TODO:
+ * _Thread_local arenas with a smart thread pool dispatcher which will dispatch to threads upon a certain threshold of elements
+ * NumArray with hand rolled AMD optimized dispatcher with an optional MKL import if on intel since intel MKL is just better and not optimized as well for AMD
  */
 
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -116,12 +115,25 @@ enum Type {
     TYPE_MAP
 };
 
+enum Num_Type {
+    TYPE_I64,
+    TYPE_U64,
+    TYPE_I32,
+    TYPE_U32,
+    TYPE_I16,
+    TYPE_U16,
+    TYPE_I8,
+    TYPE_U8,
+    TYPE_F32,
+    TYPE_F64
+};
+
 
 static inline anyarr_result handle_error(const anyarr_result error_code, uint32_t line, const char* file) {
     switch (error_code) {
         case ANYARR_ERR_OOM:
             fprintf(stderr, "[ANYARR] Out of Memory. Exiting...\nLine: %d\nFile: %s\n", line, file);
-            abort();
+            abort(); // abort since unless something catastrophic happened, you aren't supposed to run out of virtual memory
         case ANYARR_ERR_TYPE_NULLPTR:
             fprintf(stderr, "[ANYARR] Null pointer was passed.\nLine: %d\nFile: %s\n", line, file);
             break;
@@ -382,6 +394,25 @@ struct DynamicArray {
     size_t capacity;
 };
 
+typedef struct { // SoA
+    struct {
+        uint8_t type;
+        union {
+            int64_t* i64;
+            uint64_t* u64;
+            int32_t* i32;
+            uint32_t* u32;
+            int16_t* i16;
+            uint16_t* u16;
+            int8_t* i8;
+            uint8_t* u8;
+            double* f64;
+            float* f32;
+        } data;
+    };
+    size_t ele;
+} NumArray;
+
 #define CTRL_EMPTY 0xFF
 #define CTRL_DELETED 0xFE
 struct HashMap {
@@ -426,7 +457,7 @@ static inline ANY_NAMESPACE assign_char(const char c) {
 }
 
 
-static inline ANY_NAMESPACE assign_int_(const int64_t i) { // Internal until number arrays are made
+static inline ANY_NAMESPACE assign_int(const int64_t i) {
     return (ANY_NAMESPACE){TYPE_INT, .data.i = i};
 }
 
@@ -489,6 +520,97 @@ static inline ANY_NAMESPACE assign_ptr(void *p) {
         return (ANY_NAMESPACE){ANYARR_ERR_TYPE_NULLPTR};
     }
     return (ANY_NAMESPACE){TYPE_PTR, .data.p = p};
+}
+
+
+static inline NumArray assign_num_i64(int64_t *i64) {
+    if (i64 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_I64, .data.i64 = i64};
+}
+
+
+static inline NumArray assign_num_u64(uint64_t *u64) {
+    if (u64 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_U64, .data.u64 = u64};
+}
+
+
+static inline NumArray assign_num_i32(int32_t *i32) {
+    if (i32 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_I32, .data.i32 = i32};
+}
+
+
+static inline NumArray assign_num_u32(uint32_t *u32) {
+    if (u32 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_U32, .data.u32 = u32};
+}
+
+
+static inline NumArray assign_num_i16(int16_t *i16) {
+    if (i16 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_I16, .data.i16 = i16};
+}
+
+
+static inline NumArray assign_num_u16(uint16_t *u16) {
+    if (u16 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_U16, .data.u16 = u16};
+}
+
+
+static inline NumArray assign_num_i8(int8_t *i8) {
+    if (i8 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_I8, .data.i8 = i8};
+}
+
+
+
+static inline NumArray assign_num_u8(uint8_t *u8) {
+    if (u8 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_U8, .data.u8 = u8};
+}
+
+
+static inline NumArray assign_num_f64(double *f64) {
+    if (f64 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_F64, .data.f64 = f64};
+}
+
+
+static inline NumArray assign_num_f32(float *f32) {
+    if (f32 == nullptr) {
+        handle_error(ANYARR_ERR_TYPE_NULLPTR, __LINE__, __FILE__);
+        return (NumArray){ANYARR_ERR_TYPE_NULLPTR};
+    }
+    return (NumArray) {TYPE_F32, .data.f32 = f32};
 }
 
 
@@ -845,7 +967,7 @@ static inline uint64_t map_hash(const char *key) {
     const __m128i lo128 = _mm256_castsi256_si128(seeds);
     const __m128i hi128 = _mm256_extracti128_si256(seeds, 1);
     const __m128i xor128 = _mm_xor_si128(lo128, hi128);
-    uint64_t seed = (uint64_t)_mm_extract_epi64(xor128, 0) ^ (uint64_t)_mm_extract_epi64(xor128, 1);
+    const uint64_t seed = (uint64_t)_mm_extract_epi64(xor128, 0) ^ (uint64_t)_mm_extract_epi64(xor128, 1); // I have no clue why clangd is throwing error of undeclared identifier only in this branch but whatever it still compiles and runs
 #else
     __uint128_t seed = ARENA_CTX->hash_seed_c1;
     for (; len >= 8; len -= 8, p += 8) {
@@ -1917,6 +2039,20 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
     DynamicArray*: assign_array,    \
     HashMap*: assign_map,           \
     default: assign_ptr             \
+)(x)
+
+#define assign_num(x) _Generic((x), \
+    int64_t*: assign_num_i64,       \
+    uint64_t*: assign_num_u64,      \
+    int32_t*: assign_num_i32,       \
+    uint32_t*: assign_num_u32,      \
+    int16_t*: assign_num_i16,       \
+    uint16_t*: assign_num_u16,      \
+    int8_t*: assign_num_i8,         \
+    uint8_t*: assign_num_u8,        \
+    do
+
+
 )(x)
 
 #define get_any(val_ptr, out_ptr) _Generic((out_ptr),   \
