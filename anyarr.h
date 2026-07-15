@@ -15,7 +15,7 @@
 #else
 #   include <stdbool.h>
 #endif
-#if defined(__AVX512DQ__) || defined(__AVX2__) || defined(__AVX__)
+#if defined(__AVX512BW__) || defined(__AVX2__) || defined(__AVX__)
 #   include <immintrin.h>
 #endif
 #include <stdint.h>
@@ -32,7 +32,6 @@
 /*TODO:
  * _Thread_local arenas with a smart thread pool dispatcher which will dispatch to threads upon a certain threshold of elements
  * NumArray with hand rolled AMD optimized dispatcher with an optional MKL import if on intel since intel MKL is just better and not optimized as well for AMD
- * Documenting the safety features of the library to have a safer feeling C (i.e. use of abort())
  */
 
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -165,7 +164,7 @@ typedef struct {
     size_t reserved;
 } ARENA_NAMESPACE;
 
-#ifdef ANYARR_IMPLEMENTATION
+#if defined(ANYARR_IMPLEMENTATION)
 ARENA_NAMESPACE anyarr_arena_instance;
 ARENA_NAMESPACE *ARENA_CTX = nullptr;
 #else
@@ -176,7 +175,7 @@ extern ARENA_NAMESPACE *ARENA_CTX;
 
 static inline uint64_t make_seed(void) {
     uint64_t seed = 0;
-#ifdef ANYARR_PLATFORM_WINDOWS // Spent WAY TOO LONG figuring out how to get random number without BCrypt but here is reference: https://github.com/jedisct1/libsodium/blob/master/src/libsodium/randombytes/sysrandom/randombytes_sysrandom.c
+#if defined(ANYARR_PLATFORM_WINDOWS) // Spent WAY TOO LONG figuring out how to get random number without BCrypt but here is reference: https://github.com/jedisct1/libsodium/blob/master/src/libsodium/randombytes/sysrandom/randombytes_sysrandom.c
 #define RtlGenRandom SystemFunction036
     BOOLEAN NTAPI SystemFunction036(PVOID RandomBuffer, ULONG RandomBufferLength);
     RtlGenRandom(&seed, sizeof(seed));
@@ -205,7 +204,7 @@ static inline anyarr_result arena_commit(ARENA_NAMESPACE *a, const size_t extra)
         return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
     }
     size_t delta = new_committed - a->committed;
-#ifdef ANYARR_PLATFORM_WINDOWS
+#if defined(ANYARR_PLATFORM_WINDOWS)
     if (VirtualAlloc(a->base + a->committed, delta, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
         return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
     }
@@ -249,7 +248,7 @@ static inline anyarr_result arena_init(ARENA_NAMESPACE *arena) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
     size_t reserve_size = (ANYARR_RESERVE_SIZE + ARENA_COMMIT_CHUNK - 1) & ~(ARENA_COMMIT_CHUNK - 1);
-#ifdef ANYARR_PLATFORM_WINDOWS
+#if defined(ANYARR_PLATFORM_WINDOWS)
     void *base = VirtualAlloc(nullptr, reserve_size, MEM_RESERVE, PAGE_NOACCESS);
     if (base == nullptr) {
         return handle_error(ANYARR_ERR_OOM, __LINE__, __FILE__);
@@ -281,7 +280,7 @@ static inline anyarr_result arena_free(ARENA_NAMESPACE *arena) {
     if (arena->base == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
-#ifdef ANYARR_PLATFORM_WINDOWS
+#if defined(ANYARR_PLATFORM_WINDOWS)
     VirtualFree(arena->base, 0, MEM_RELEASE);
 #else
     munmap(arena->base, arena->reserved);
@@ -314,8 +313,8 @@ static inline void arena_restore(ARENA_NAMESPACE *arena, const size_t saved) {
 }
 
 
-static inline void checkpoint_cleanup(const size_t *cp) {
-    arena_restore(ARENA_CTX, *cp);
+static inline void checkpoint_cleanup(ARENA_NAMESPACE *arena, const size_t *cp) {
+    arena_restore(arena, *cp);
 }
 
 #define ARENA_TEMP __attribute__((cleanup(checkpoint_cleanup))) size_t
@@ -457,10 +456,10 @@ static inline void map_init_arena(HashMap *m, ARENA_NAMESPACE *arena) {
     m->size = 0;
     m->capacity = 64;
     m->tombstone = 0;
-    arena_alloc(arena, m->capacity * sizeof(uint8_t), (void **) &m->fingerprint);
+    arena_alloc(arena, m->capacity * sizeof(uint8_t) + 32, (void **) &m->fingerprint);
     arena_alloc(arena, m->capacity * sizeof(char *), (void **) &m->key);
     arena_alloc(arena, m->capacity * sizeof(ANY_NAMESPACE), (void **) &m->value);
-    memset(m->fingerprint, CTRL_EMPTY, m->capacity);
+    memset(m->fingerprint, CTRL_EMPTY, m->capacity + 32);
     m->hash_seed = make_seed();
     m->hash_seed_c1 = m->hash_seed ^ WY1;
 }
@@ -908,7 +907,7 @@ static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) 
 
         case TYPE_INT:
             INDENT();
-#ifdef ANYARR_PLATFORM_WINDOWS
+#if defined(ANYARR_PLATFORM_WINDOWS)
             printf("int64_t: %lld\n", val->data.i);
 #else
             printf("int_64_t: %ld\n", val->data.i);
@@ -917,7 +916,7 @@ static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) 
 
         case TYPE_UINT:
             INDENT();
-#ifdef ANYARR_PLATFORM_WINDOWS
+#if defined(ANYARR_PLATFORM_WINDOWS)
             printf("uint64_t: %llu\n", val->data.u);
 #else
             printf("uint64_t: %lu\n", val->data.u);
@@ -1018,108 +1017,81 @@ static inline anyarr_result any_print_helper(ANY_NAMESPACE val) {
 static inline uint64_t map_hash(const HashMap *map, const char *key) {
     static const uint64_t WY0 = 0xa0761d6478bd642full;
     static const uint64_t WY1 = 0xe7037ed1a0b428dbull;
-    size_t len = strlen(key);
+    static const uint64_t WY2 = 0x3c6ef372fe94f82bull;
+    static const uint64_t WY3 = 0xf1357aea2e62a9c5ull;
+    const size_t len = strlen(key);
     const uint8_t *p = (const uint8_t *)key;
-#ifdef __AVX512DQ__
-    __m512i seeds = _mm512_set1_epi64((int64_t)map->hash_seed_c1);
-    const __m512i c0 = _mm512_set1_epi64((int64_t)WY0);
-    for (; len >= 64; len -= 64, p += 64) {
-        const __m512i chunk = _mm512_loadu_si512(p);
-        const __m512i a = _mm512_xor_si512(chunk, c0);
-        const __m512i mul_64 = _mm512_mullo_epi64(a, seeds);
-        seeds = _mm512_xor_si512(seeds, mul_64);
-    }
-    if (len > 0) {
-        const __mmask64 tail_mask = (1ULL << len) - 1;
-        const __m512i tail = _mm512_maskz_loadu_epi8(tail_mask, p);
-        const __m512i a = _mm512_xor_si512(tail, c0);
-        const __m512i mul_64 = _mm512_mullo_epi64(a, seeds);
-        seeds = _mm512_xor_si512(seeds, mul_64);
-    }
-    // Diving into 256 bit instructions since there's no masked xor for 512 bits
-    const __m256i lo256 = _mm512_castsi512_si256(seeds);
-    const __m256i hi256 = _mm512_extracti64x4_epi64(seeds, 1);
-    const __m256i xor256 = _mm256_xor_si256(lo256, hi256);
-    const __m128i lo128 = _mm256_castsi256_si128(xor256);
-    const __m128i hi128 = _mm256_extracti128_si256(xor256, 1);
-    const __m128i xor128 = _mm_xor_si128(lo128, hi128);
-    const uint64_t seed = (uint64_t)_mm_extract_epi64(xor128, 0) ^ (uint64_t)_mm_extract_epi64(xor128, 1);
-#elif defined(__AVX2__)
-    __m256i seeds = _mm256_set1_epi64x((int64_t)map->hash_seed_c1);
-    const __m256i c0 = _mm256_set1_epi64x((int64_t)WY0);
-    for (; len >= 32; len -= 32, p += 32) {
-        const __m256i chunk = _mm256_loadu_si256((const __m256i *)p);
-        const __m256i a = _mm256_xor_si256(chunk, c0);
-        const __m256i lo_lo = _mm256_mul_epi32(a, seeds);
-        const __m256i a_hi = _mm256_srli_epi64(a, 32);
-        const __m256i seed_hi = _mm256_srli_epi64(seeds, 32);
-        const __m256i hi_lo = _mm256_mul_epu32(a_hi, seeds);
-        const __m256i lo_hi = _mm256_mul_epu32(a, seed_hi);
-        const __m256i cross = _mm256_slli_epi64(_mm256_add_epi64(hi_lo, lo_hi), 32);
-        const __m256i mul_64 = _mm256_add_epi64(lo_lo, cross);
-        seeds = _mm256_xor_si256(seeds, mul_64);
-    }
-    if (len > 0) {
-        uint8_t temp[32] = {0};
-        memcpy(temp, p, len);
-        const __m256i tail = _mm256_loadu_si256((const __m256i *)temp);
-        const __m256i a = _mm256_xor_si256(tail, c0);
-        const __m256i lo_lo = _mm256_mul_epi32(a, seeds);
-        const __m256i a_hi = _mm256_srli_epi64(a, 32);
-        const __m256i seed_hi = _mm256_srli_epi64(seeds, 32);
-        const __m256i hi_lo = _mm256_mul_epu32(a_hi, seeds);
-        const __m256i lo_hi = _mm256_mul_epu32(a, seed_hi);
-        const __m256i cross = _mm256_slli_epi64(_mm256_add_epi64(hi_lo, lo_hi), 32);
-        const __m256i mul_64 = _mm256_add_epi64(lo_lo, cross);
-        seeds = _mm256_xor_si256(seeds, mul_64);
-    }
-    const __m128i lo128 = _mm256_castsi256_si128(seeds);
-    const __m128i hi128 = _mm256_extracti128_si256(seeds, 1);
-    const __m128i xor128 = _mm_xor_si128(lo128, hi128);
-    const uint64_t seed = (uint64_t)_mm_extract_epi64(xor128, 0) ^ (uint64_t)_mm_extract_epi64(xor128, 1); // I have no clue why clangd is throwing error of undeclared identifier only in this branch but whatever it still compiles and runs
-#else
-    __uint128_t seed = map->hash_seed_c1;
-    for (; len >= 8; len -= 8, p += 8) {
-        uint64_t a = 0, b = 0;
-        memcpy(&a, p, 4);
-        memcpy(&b, p + 4, 4);
-        const __uint128_t m = (__uint128_t)(a ^ WY0) * (b ^ WY1);
-        seed ^= (uint64_t)(m) ^ (uint64_t)(m >> 64);
-    }
-    uint64_t a = 0, b = 0;
-    switch (len) {
-        case 7:
-            b = (uint64_t)p[6] << 32;
-        case 6:
-            b |= (uint64_t)p[5] << 16;
-        case 5:
-            b |= (uint64_t)p[4] << 8;
-        case 4:
-            memcpy(&a, p, 4);
-            break;
-        case 3:
-            a = (uint64_t)p[2] << 16;
-        case 2:
-            a |= (uint64_t)p[1] << 8;
-        case 1:
-            a |= (uint64_t)p[0];
+    uint64_t seed = map->hash_seed ^ WY0;
+    uint64_t a, b;
+
+    if (__builtin_expect(len <= 16, 1)) {
+        if (__builtin_expect(len >= 4, 1)) {
+            uint32_t lo0, lo1, hi0, hi1;
+            memcpy(&lo0, p, 4);
+            memcpy(&lo1, p + ((len >> 3) << 2), 4);
+            memcpy(&hi0, p + len - 4, 4);
+            memcpy(&hi1, p + len - 4 - ((len >> 3) << 2), 4);
+            a = ((uint64_t)lo0 << 32) | (uint64_t)lo1;
+            b = ((uint64_t)hi0 << 32) | (uint64_t)hi1;
+        } else if (__builtin_expect(len > 0, 1)) {
+            a = ((uint64_t)p[0] << 16) | ((uint64_t)p[len >> 1] << 8) | (uint64_t)p[len - 1];
             b = 0;
-            break;
-        case 0:
-            a = 0;
-            b = 0;
-            break;
+        } else {
+            a = 0; b = 0;
+        }
+    } else if (__builtin_expect(len <= 48, 1)) {
+        uint64_t r0, r1, r2, r3;
+        memcpy(&r0, p, 8);
+        memcpy(&r1, p + 8, 8);
+        __uint128_t m0 = (__uint128_t)(r0 ^ WY1) * (r1 ^ seed);
+        seed = (uint64_t)(m0) ^ (uint64_t)(m0 >> 64);
+        if (len > 32) {
+            memcpy(&r2, p + 16, 8);
+            memcpy(&r3, p + 24, 8);
+            __uint128_t m1 = (__uint128_t)(r2 ^ WY2) * (r3 ^ seed);
+            seed = (uint64_t)(m1) ^ (uint64_t)(m1 >> 64);
+        }
+        memcpy(&a, p + len - 16, 8);
+        memcpy(&b, p + len - 8, 8);
+    } else {
+        size_t i = len;
+        uint64_t s1 = seed, s2 = seed;
+        while (__builtin_expect(i > 48, 1)) {
+            uint64_t r0, r1, r2, r3, r4, r5;
+            memcpy(&r0, p, 8);
+            memcpy(&r1, p + 8, 8);
+            memcpy(&r2, p + 16, 8);
+            memcpy(&r3, p + 24, 8);
+            memcpy(&r4, p + 32, 8);
+            memcpy(&r5, p + 40, 8);
+            __uint128_t m0 = (__uint128_t)(r0 ^ WY1) * (r1 ^ seed);
+            seed = (uint64_t)(m0) ^ (uint64_t)(m0 >> 64);
+            __uint128_t m1 = (__uint128_t)(r2 ^ WY2) * (r3 ^ s1);
+            s1 = (uint64_t)(m1) ^ (uint64_t)(m1 >> 64);
+            __uint128_t m2 = (__uint128_t)(r4 ^ WY3) * (r5 ^ s2);
+            s2 = (uint64_t)(m2) ^ (uint64_t)(m2 >> 64);
+            p += 48; i -= 48;
+        }
+        seed ^= s1 ^ s2;
+        while (i > 16) {
+            uint64_t r0, r1;
+            memcpy(&r0, p, 8);
+            memcpy(&r1, p + 8, 8);
+            __uint128_t m0 = (__uint128_t)(r0 ^ WY1) * (r1 ^ seed);
+            seed = (uint64_t)(m0) ^ (uint64_t)(m0 >> 64);
+            p += 16; i -= 16;
+        }
+        memcpy(&a, p + i - 16, 8);
+        memcpy(&b, p + i - 8, 8);
     }
-    const __uint128_t m = (__uint128_t)(a ^ WY0) * (b ^ WY1);
-    seed ^= (uint64_t)(m) ^ (uint64_t)(m >> 64);
-#endif
-    const __uint128_t f = (__uint128_t)(seed ^ WY0) * (seed ^ WY1);
-    return (uint64_t)(f) ^ (uint64_t)(f >> 64);
+
+    const __uint128_t final = (__uint128_t)(WY1 ^ len) * ((__uint128_t)(a ^ WY1) * (b ^ seed));
+    return (uint64_t)(final) ^ (uint64_t)(final >> 64);
 }
 
 
 static inline void resize_memset(uint8_t *out, const size_t count) {
-#ifdef __AVX512DQ__
+#if  defined(__AVX512BW__)
     const __m512i empty_vec = _mm512_set1_epi8((char)CTRL_EMPTY);
     const uint8_t *end = out + count;
     while ((uintptr_t)out & 63) *out++ = CTRL_EMPTY;
@@ -1133,7 +1105,7 @@ static inline void resize_memset(uint8_t *out, const size_t count) {
     _mm_sfence();
 #elif defined(__AVX2__)
     const __m256i empty_vec = _mm256_set1_epi8((char)CTRL_EMPTY);
-    uint8_t *end = out + count;
+    const uint8_t *end = out + count;
     while ((uintptr_t)out & 31) *out++ = CTRL_EMPTY;
     while (out + 32 <= end) {
         _mm256_stream_si256((__m256i *)out, empty_vec);
@@ -1161,17 +1133,17 @@ static inline anyarr_result map_resize_arena(HashMap *m, ARENA_NAMESPACE *arena)
     uint8_t *new_fingerprint = nullptr;
     char **new_key = nullptr;
     ANY_NAMESPACE *new_value = nullptr;
-    arena_alloc(arena, new_capacity * sizeof(uint8_t), (void **) &new_fingerprint);
+    arena_alloc(arena, new_capacity * sizeof(uint8_t) + 32, (void **) &new_fingerprint);
     arena_alloc(arena, new_capacity * sizeof(char *), (void **) &new_key);
     arena_alloc(arena, new_capacity * sizeof(ANY_NAMESPACE), (void **) &new_value);
-    resize_memset(new_fingerprint, new_capacity);
+    resize_memset(new_fingerprint, new_capacity + 32);
     m->fingerprint = new_fingerprint;
     m->key = new_key;
     m->value = new_value;
     m->capacity = new_capacity;
     m->size = 0;
     m->tombstone = 0;
-#ifdef __AVX512DQ__
+#if defined(__AVX512BW__)
     const __m512i top_bit_vec = _mm512_set1_epi8((char)0x80);
     for (size_t i = 0; i < old_capacity; ) {
         const size_t remaining = old_capacity - i;
@@ -1264,14 +1236,14 @@ static inline anyarr_result map_resize_impl(HashMap *m) {
 #define map_resize(...) ANYARR_ARG2(__VA_ARGS__, map_resize_arena, map_resize_impl) (__VA_ARGS__)
 
 
-static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+static inline anyarr_result map_get_impl(const HashMap *m, const char *key, ANY_NAMESPACE **out_value, const _Bool is_internal) {
     if (m == nullptr || m->key == nullptr || key == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
     const uint64_t hash = map_hash(m, key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;  // There's a 1/255 chance that the fingerprint itself can store 0xFF or 0xFE as value so we truncate the first bit so it never reaches that range
     size_t index = hash & (m->capacity - 1);
-#ifdef __AVX512DQ__
+#if defined(__AVX512BW__)
     const __m512i fingerprint_vec = _mm512_set1_epi8((char)fingerprint);
     const __m512i empty_vec = _mm512_set1_epi8((char)CTRL_EMPTY);
     while (true) {
@@ -1302,7 +1274,11 @@ static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMES
         }
         index = (index + step) & (m->capacity - 1);
         if (empty_mask != 0) {
-            return handle_error(ANYARR_ERR_EMPTY_KEY, __LINE__, __FILE__);
+            if (!is_internal) {
+                return handle_error(ANYARR_ERR_EMPTY_KEY, __LINE__, __FILE__);
+            } else {
+                return ANYARR_ERR_EMPTY_KEY;
+            }
         }
     }
 #elif defined(__AVX2__)
@@ -1336,14 +1312,22 @@ static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMES
         }
         index = (index + step) & (m->capacity - 1);
         if (empty_bits != 0) {
-            return handle_error(ANYARR_ERR_EMPTY_KEY, __LINE__, __FILE__);
+            if (!is_internal) {
+                return handle_error(ANYARR_ERR_EMPTY_KEY, __LINE__, __FILE__);
+            } else {
+                return ANYARR_ERR_EMPTY_KEY;
+            }
         }
     }
 #else
     while (true) {
         const uint8_t ctrl = m->fingerprint[index];
         if (ctrl == CTRL_EMPTY) {
-            return handle_error(ANYARR_ERR_EMPTY_KEY, __LINE__, __FILE__);
+            if (!is_internal) {
+                return handle_error(ANYARR_ERR_EMPTY_KEY, __LINE__, __FILE__);
+            } else {
+                return ANYARR_ERR_EMPTY_KEY;
+            }
         }
         if (ctrl == fingerprint && strcmp(m->key[index], key) == 0) {
             *out_value = &m->value[index];
@@ -1357,15 +1341,30 @@ static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMES
 
 // Internal and only returns value instead of printing to stderr
 static inline anyarr_result map_get_silent(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+    return map_get_impl(m, key, out_value, true);
+}
+
+
+static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+    return map_get_impl(m, key, out_value, false);
+}
+
+
+static inline void map_put_arena(HashMap *m, const char *key, const ANY_NAMESPACE value, ARENA_NAMESPACE *arena) {
     if (m == nullptr || m->key == nullptr || key == nullptr) {
-        return handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
+        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
+    }
+    if ((m->size + m->tombstone + 1) * 8 >= m->capacity * 7) {
+        map_resize(m, arena);
     }
     const uint64_t hash = map_hash(m, key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;
     size_t index = hash & (m->capacity - 1);
-#ifdef __AVX512DQ__
+    size_t first_tombstone = SIZE_MAX;
+#if defined(__AVX512BW__)
     const __m512i fingerprint_vec = _mm512_set1_epi8((char)fingerprint);
     const __m512i empty_vec = _mm512_set1_epi8((char)CTRL_EMPTY);
+    const __m512i deleted_vec = _mm512_set1_epi8((char)CTRL_DELETED);
     while (true) {
         const size_t remaining = m->capacity - index;
         __mmask64 load_mask;
@@ -1375,89 +1374,116 @@ static inline anyarr_result map_get_silent(const HashMap *m, const char *key, AN
             load_mask = (1ULL << remaining) - 1;
         }
         const __m512i chunk = _mm512_maskz_loadu_epi8(load_mask, &m->fingerprint[index]);
-        const __mmask64 non_empty = _mm512_mask_cmpneq_epi8_mask(load_mask, chunk, empty_vec);
-        const __mmask64 empty_mask   = _mm512_mask_cmpeq_epi8_mask(load_mask, chunk, empty_vec);
-        const __mmask64 candidates = _mm512_mask_cmpeq_epi8_mask(non_empty, chunk, fingerprint_vec);
-        uint64_t hits = (uint64_t)candidates;
+        const uint64_t fp_bits      = (uint64_t)_mm512_mask_cmpeq_epi8_mask(load_mask, chunk, fingerprint_vec);
+        const uint64_t empty_bits   = (uint64_t)_mm512_mask_cmpeq_epi8_mask(load_mask, chunk, empty_vec);
+        const uint64_t deleted_bits = (uint64_t)_mm512_mask_cmpeq_epi8_mask(load_mask, chunk, deleted_vec);
+
+        uint64_t hits = fp_bits;
         while (hits) {
             const uint64_t slot = _tzcnt_u64(hits);
             const size_t i = (index + slot) & (m->capacity - 1);
             if (strcmp(m->key[i], key) == 0) {
-                *out_value = &m->value[i];
-                return ANYARR_OK;
+                m->value[i] = value;
+                return;
             }
             hits = _blsr_u64(hits);
         }
-        size_t step = remaining;
-        if (remaining >= 64) {
-            step = 64;
+
+        if (first_tombstone == SIZE_MAX && deleted_bits) {
+            uint64_t valid_deleted = deleted_bits;
+            if (empty_bits) {
+                const uint64_t empty_lsb = empty_bits & (~empty_bits + 1);
+                valid_deleted &= (empty_lsb - 1); // only tombstones reachable before the terminator
+            }
+            if (valid_deleted) {
+                const uint64_t slot = _tzcnt_u64(valid_deleted);
+                first_tombstone = (index + slot) & (m->capacity - 1);
+            }
         }
+
+        if (empty_bits) {
+            const uint64_t slot = _tzcnt_u64(empty_bits);
+            size_t insert_at = (index + slot) & (m->capacity - 1);
+            if (first_tombstone != SIZE_MAX) {
+                insert_at = first_tombstone;
+                m->tombstone--;
+            }
+            const size_t key_len = strlen(key);
+            char *current_key;
+            arena_alloc(arena, key_len + 1, (void **) &current_key);
+            memcpy(current_key, key, key_len + 1);
+            m->key[insert_at] = current_key;
+            m->value[insert_at] = value;
+            m->fingerprint[insert_at] = fingerprint;
+            m->size++;
+            return;
+        }
+
+        const size_t step = (remaining >= 64) ? 64 : remaining;
         index = (index + step) & (m->capacity - 1);
-        if (empty_mask != 0) {
-            return ANYARR_ERR_EMPTY_KEY;
-        }
     }
 #elif defined(__AVX2__)
     const __m256i fingerprint_vec = _mm256_set1_epi8((char)fingerprint);
     const __m256i empty_vec = _mm256_set1_epi8((char)CTRL_EMPTY);
+    const __m256i deleted_vec = _mm256_set1_epi8((char)CTRL_DELETED);
     while (true) {
         const size_t remaining = m->capacity - index;
-        const __m256i chunk = _mm256_loadu_si256((const __m256i *) &m->fingerprint[index]);
         uint32_t load_mask;
         if (remaining >= 32) {
             load_mask = ~0U;
         } else {
             load_mask = (1U << remaining) - 1;
         }
-        const uint32_t empty_bits = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, empty_vec)) & load_mask;
-        const uint32_t fp_bits = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, fingerprint_vec)) & load_mask;
-        const uint32_t non_empty = load_mask & ~empty_bits;
-        uint32_t hits = fp_bits & non_empty;
+        const __m256i chunk = _mm256_loadu_si256((const __m256i *)&m->fingerprint[index]);
+        const uint32_t fp_bits      = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, fingerprint_vec)) & load_mask;
+        const uint32_t empty_bits   = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, empty_vec)) & load_mask;
+        const uint32_t deleted_bits = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, deleted_vec)) & load_mask;
+
+        uint32_t hits = fp_bits;
         while (hits) {
             const uint64_t slot = _tzcnt_u32(hits);
             const size_t i = (index + slot) & (m->capacity - 1);
             if (strcmp(m->key[i], key) == 0) {
-                *out_value = &m->value[i];
-                return ANYARR_OK;
+                m->value[i] = value;
+                return;
             }
             hits = _blsr_u32(hits);
         }
-        size_t step = remaining;
-        if (remaining >= 32) {
-            step = 32;
+
+        if (first_tombstone == SIZE_MAX && deleted_bits) {
+            uint32_t valid_deleted = deleted_bits;
+            if (empty_bits) {
+                const uint32_t empty_lsb = empty_bits & (~empty_bits + 1);
+                valid_deleted &= (empty_lsb - 1);
+            }
+            if (valid_deleted) {
+                const uint64_t slot = _tzcnt_u32(valid_deleted);
+                first_tombstone = (index + slot) & (m->capacity - 1);
+            }
         }
+
+        if (empty_bits) {
+            const uint64_t slot = _tzcnt_u32(empty_bits);
+            size_t insert_at = (index + slot) & (m->capacity - 1);
+            if (first_tombstone != SIZE_MAX) {
+                insert_at = first_tombstone;
+                m->tombstone--;
+            }
+            const size_t key_len = strlen(key);
+            char *current_key;
+            arena_alloc(arena, key_len + 1, (void **) &current_key);
+            memcpy(current_key, key, key_len + 1);
+            m->key[insert_at] = current_key;
+            m->value[insert_at] = value;
+            m->fingerprint[insert_at] = fingerprint;
+            m->size++;
+            return;
+        }
+
+        const size_t step = (remaining >= 32) ? 32 : remaining;
         index = (index + step) & (m->capacity - 1);
-        if (empty_bits != 0) {
-            return ANYARR_ERR_EMPTY_KEY;
-        }
     }
 #else
-    while (true) {
-        const uint8_t ctrl = m->fingerprint[index];
-        if (ctrl == CTRL_EMPTY) {
-            return ANYARR_ERR_EMPTY_KEY;
-        }
-        if (ctrl == fingerprint && strcmp(m->key[index], key) == 0) {
-            *out_value = &m->value[index];
-            return ANYARR_OK;
-        }
-        index = (index + 1) & (m->capacity - 1);
-    }
-#endif
-}
-
-
-static inline void map_put_arena(HashMap *m, const char *key, const ANY_NAMESPACE value, ARENA_NAMESPACE *arena) {
-    if (m == nullptr || m->key == nullptr || key == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    if ((m->size + m->tombstone + 1) * 4 >= m->capacity * 3) {
-        map_resize(m, arena);
-    }
-    const uint64_t hash = map_hash(m, key);
-    const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;
-    size_t index = hash & (m->capacity - 1);
-    size_t first_tombstone = SIZE_MAX;
     while (true) {
         const uint8_t ctrl = m->fingerprint[index];
         if (ctrl == CTRL_EMPTY) {
@@ -1486,6 +1512,7 @@ static inline void map_put_arena(HashMap *m, const char *key, const ANY_NAMESPAC
         }
         index = (index + 1) & (m->capacity - 1);
     }
+#endif
 }
 
 
@@ -1506,7 +1533,7 @@ static inline anyarr_result map_remove(HashMap *m, const char *key) {
     const uint64_t hash = map_hash(m, key);
     const uint8_t fingerprint = (uint8_t)(hash >> 56) & 0x7F;
     size_t index = hash & (m->capacity - 1);
-#ifdef __AVX512DQ__
+#if defined(__AVX512BW__)
     const __m512i fingerprint_vec = _mm512_set1_epi8((char)fingerprint);
     const __m512i empty_vec = _mm512_set1_epi8((char)CTRL_EMPTY);
     while (true) {
@@ -1603,7 +1630,7 @@ static inline void array_copy(ANY_NAMESPACE *out, ANY_NAMESPACE *in, const size_
         memcpy(out, in, bytes);
         return;
     }
-#ifdef __AVX512DQ__
+#if defined(__AVX512BW__)
     const ANY_NAMESPACE *end = in + count;
     while ((uintptr_t)out & 63) {
         *out++ = *in++;

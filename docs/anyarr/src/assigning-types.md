@@ -39,6 +39,15 @@ assign_any(&player);
 */
 ```
 
+If you have multiple arena lifetimes, you can still use `assign_any()` but you need to pass the arena as well
+
+```c
+assign_any("This is a long that is heap allocated", &custom_arena);
+assign_any(&player, &custom_arena1);
+assign_any(&blob, &custom_arena_electric_boogaloo);
+```
+
+
 **DynamicArray:** Wraps a DynamicArray into an Any value. The array can still be used directly through its pointer for appending and indexing.
 
 ```c

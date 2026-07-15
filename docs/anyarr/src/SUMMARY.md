@@ -3,7 +3,7 @@
 [Introduction](./intro.md)
 - [Arena Allocator](./arena.md)
 - [Any Type](./any.md)
-    - [Assigning Values](./any-assign.md)
+    - [Assigning Values](assigning-types.md)
     - [Reading Values](./any-get.md)
 - [Dynamic Array](./array.md)
 - [HashMap](./map.md)
