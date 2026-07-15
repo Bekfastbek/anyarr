@@ -29,10 +29,6 @@
 #  endif
 #endif
 
-/*TODO:
- * _Thread_local arenas with a smart thread pool dispatcher which will dispatch to threads upon a certain threshold of elements
- * NumArray with hand rolled AMD optimized dispatcher with an optional MKL import if on intel since intel MKL is just better and not optimized as well for AMD
- */
 
 #pragma GCC diagnostic ignored "-Wunused-function"
 
@@ -391,25 +387,6 @@ struct DynamicArray {
     size_t capacity;
 };
 
-typedef struct { // SoA
-    struct {
-        uint8_t type;
-        union {
-            int64_t* i64;
-            uint64_t* u64;
-            int32_t* i32;
-            uint32_t* u32;
-            int16_t* i16;
-            uint16_t* u16;
-            int8_t* i8;
-            uint8_t* u8;
-            double* f64;
-            float* f32;
-        } data;
-    };
-    size_t ele;
-} NumArray;
-
 #define CTRL_EMPTY 0xFF
 #define CTRL_DELETED 0xFE
 struct HashMap {
@@ -665,87 +642,6 @@ static inline ANY_NAMESPACE assign_ptr(void *p) {
 )
 
 #define assign_any(...) ANYARR_ARG2(__VA_ARGS__, assign_any_arena, assign_any_impl)(__VA_ARGS__)
-
-
-static inline NumArray assign_num_i64(int64_t *i64) {
-    if (i64 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_I64, .data.i64 = i64};
-}
-
-
-static inline NumArray assign_num_u64(uint64_t *u64) {
-    if (u64 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_U64, .data.u64 = u64};
-}
-
-
-static inline NumArray assign_num_i32(int32_t *i32) {
-    if (i32 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_I32, .data.i32 = i32};
-}
-
-
-static inline NumArray assign_num_u32(uint32_t *u32) {
-    if (u32 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_U32, .data.u32 = u32};
-}
-
-
-static inline NumArray assign_num_i16(int16_t *i16) {
-    if (i16 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_I16, .data.i16 = i16};
-}
-
-
-static inline NumArray assign_num_u16(uint16_t *u16) {
-    if (u16 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_U16, .data.u16 = u16};
-}
-
-
-static inline NumArray assign_num_i8(int8_t *i8) {
-    if (i8 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_I8, .data.i8 = i8};
-}
-
-
-
-static inline NumArray assign_num_u8(uint8_t *u8) {
-    if (u8 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_U8, .data.u8 = u8};
-}
-
-
-static inline NumArray assign_num_f64(double *f64) {
-    if (f64 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_F64, .data.f64 = f64};
-}
-
-
-static inline NumArray assign_num_f32(float *f32) {
-    if (f32 == nullptr) {
-        handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
-    }
-    return (NumArray) {TYPE_F32, .data.f32 = f32};
-}
 
 
 static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, _Bool *out_value) {
