@@ -6,6 +6,7 @@
  * Also this library is made to be as fast as possible while being easy to use so it's not exactly efficient on memory usage
  * As of now this library does not guarantee thread safety and documentation is in the README of the repo
  * It only works on MinGW on Windows and not at all on MSVC
+ * A good idea would be making a thread pool with each thread holding an individual arena if you want to implement your own thread pool
 */
 
 #ifndef ANYARR_H
@@ -93,6 +94,7 @@ typedef enum {
     ANYARR_ERR_EMPTY = 0x06,
     ANYARR_ERR_EMPTY_KEY = 0x07,
     ANYARR_ERR_TYPE_MISMATCH = 0x08,
+    ANYARR_ERR_OTHER = 0x09,
 } anyarr_result;
 
 enum Type {
@@ -126,7 +128,7 @@ enum Num_Type {
 };
 
 
-static inline anyarr_result handle_error(const anyarr_result error_code, uint32_t line, const char* file) {
+static inline anyarr_result handle_error(const uint8_t error_code, const uint32_t line, const char* file) {
     switch (error_code) {
         case ANYARR_ERR_OOM:
             fprintf(stderr, "[ANYARR] Out of Memory. Exiting...\nLine: %d\nFile: %s\n", line, file);
@@ -146,6 +148,8 @@ static inline anyarr_result handle_error(const anyarr_result error_code, uint32_
         case ANYARR_ERR_TYPE_MISMATCH:
             fprintf(stderr, "[ANYARR] Type mismatch.\nLine: %d\nFile: %s\n", line, file);
             break;
+        case ANYARR_ERR_OTHER:
+            fprintf(stderr, "[ANYARR] Error: %x\nLine: %d\nFile: %s\n", error_code, line, file);
         default:
             break;
     }
@@ -176,7 +180,10 @@ static inline uint64_t make_seed(void) {
     BOOLEAN NTAPI SystemFunction036(PVOID RandomBuffer, ULONG RandomBufferLength);
     RtlGenRandom(&seed, sizeof(seed));
 #else
-    getentropy(&seed, sizeof(seed)); // getrandom() is not required for this use case, it only needs to init once and the seed !>255
+    const uint8_t error = getentropy(&seed, sizeof(seed)); // getrandom() is not required for this use case, it only needs to init once and the seed !>255
+    if (error != 0) {
+        handle_error(error, __LINE__, __FILE__);
+    }
 #endif
     if (seed == 0) {
         fprintf(stderr, "Seed failed. Aborting...");
