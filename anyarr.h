@@ -30,7 +30,7 @@
 #  endif
 #endif
 
-
+#pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -42,7 +42,6 @@
 #else
 #   include <sys/mman.h>
 #   include <sys/random.h>
-#   include <pthread.h>
 #   ifndef MAP_ANONYMOUS
 #       define MAP_ANONYMOUS MAP_ANON
 #   endif
@@ -94,7 +93,6 @@ typedef enum {
     ANYARR_ERR_EMPTY = 0x06,
     ANYARR_ERR_EMPTY_KEY = 0x07,
     ANYARR_ERR_TYPE_MISMATCH = 0x08,
-    ANYARR_ERR_OTHER = 0x09,
 } anyarr_result;
 
 enum Type {
@@ -148,9 +146,8 @@ static inline anyarr_result handle_error(const uint8_t error_code, const uint32_
         case ANYARR_ERR_TYPE_MISMATCH:
             fprintf(stderr, "[ANYARR] Type mismatch.\nLine: %d\nFile: %s\n", line, file);
             break;
-        case ANYARR_ERR_OTHER:
-            fprintf(stderr, "[ANYARR] Error: %x\nLine: %d\nFile: %s\n", error_code, line, file);
         default:
+            fprintf(stderr, "[ANYARR] Error: %10x\nLine: %d\nFile: %s\n", error_code, line, file);
             break;
     }
     return error_code;
@@ -316,8 +313,8 @@ static inline void arena_restore(ARENA_NAMESPACE *arena, const size_t saved) {
 }
 
 
-static inline void checkpoint_cleanup(ARENA_NAMESPACE *arena, const size_t *cp) {
-    arena_restore(arena, *cp);
+static inline void checkpoint_cleanup(const size_t *cp) {
+    arena_restore(nullptr, *cp);
 }
 
 #define ARENA_TEMP __attribute__((cleanup(checkpoint_cleanup))) size_t
@@ -432,7 +429,7 @@ typedef struct {
 #define ANYARR_ARG5(_1, _2, _3, _4, _5, N, ...) N
 
 
-static inline void map_init_arena(HashMap *m, ARENA_NAMESPACE *arena) {
+static inline void _map_init_arena(HashMap *m, ARENA_NAMESPACE *arena) {
     if (m == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -449,14 +446,14 @@ static inline void map_init_arena(HashMap *m, ARENA_NAMESPACE *arena) {
 }
 
 
-static inline void map_init_impl(HashMap *m) {
-    map_init_arena(m, ARENA_CTX);
+static inline void _map_init_impl(HashMap *m) {
+    _map_init_arena(m, ARENA_CTX);
 }
 
-#define map_init(...) ANYARR_ARG2(__VA_ARGS__, map_init_arena, map_init_impl) (__VA_ARGS__)
+#define map_init(...) ANYARR_ARG2(__VA_ARGS__, _map_init_arena, _map_init_impl) (__VA_ARGS__)
 
 
-static inline void array_init_arena(DynamicArray *buf, ARENA_NAMESPACE *arena) {
+static inline void _array_init_arena(DynamicArray *buf, ARENA_NAMESPACE *arena) {
     if (buf == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -466,11 +463,11 @@ static inline void array_init_arena(DynamicArray *buf, ARENA_NAMESPACE *arena) {
 }
 
 
-static inline void array_init_impl(DynamicArray *buf) {
-    array_init_arena(buf, ARENA_CTX);
+static inline void _array_init_impl(DynamicArray *buf) {
+    _array_init_arena(buf, ARENA_CTX);
 }
 
-#define array_init(...) ANYARR_ARG2(__VA_ARGS__, array_init_arena, array_init_impl) (__VA_ARGS__)
+#define array_init(...) ANYARR_ARG2(__VA_ARGS__, _array_init_arena, _array_init_impl) (__VA_ARGS__)
 
 
 static inline ANY_NAMESPACE assign_null(void) {
@@ -508,7 +505,7 @@ static inline ANY_NAMESPACE assign_double(const double d) {
 }
 
 
-static inline ANY_NAMESPACE assign_string_arena(const char *s, ARENA_NAMESPACE *arena) {
+static inline ANY_NAMESPACE _assign_string_arena(const char *s, ARENA_NAMESPACE *arena) {
     if (s == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -525,14 +522,14 @@ static inline ANY_NAMESPACE assign_string_arena(const char *s, ARENA_NAMESPACE *
 }
 
 
-static inline ANY_NAMESPACE assign_string_impl(const char *s) {
-    return assign_string_arena(s, ARENA_CTX);
+static inline ANY_NAMESPACE _assign_string_impl(const char *s) {
+    return _assign_string_arena(s, ARENA_CTX);
 }
 
-#define assign_string(...) ANYARR_ARG2(__VA_ARGS__, assign_string_arena, assign_string_impl) (__VA_ARGS__)
+#define assign_string(...) ANYARR_ARG2(__VA_ARGS__, _assign_string_arena, _assign_string_impl) (__VA_ARGS__)
 
 
-static inline ANY_NAMESPACE assign_blob_arena(const Blob *l, ARENA_NAMESPACE *arena) {
+static inline ANY_NAMESPACE _assign_blob_arena(const Blob *l, ARENA_NAMESPACE *arena) {
     if (l == nullptr || l->ptr == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -550,14 +547,14 @@ static inline ANY_NAMESPACE assign_blob_arena(const Blob *l, ARENA_NAMESPACE *ar
 }
 
 
-static inline ANY_NAMESPACE assign_blob_impl(const Blob *l) {
-    return assign_blob_arena(l, ARENA_CTX);
+static inline ANY_NAMESPACE _assign_blob_impl(const Blob *l) {
+    return _assign_blob_arena(l, ARENA_CTX);
 }
 
-#define assign_blob(...) ANYARR_ARG2(__VA_ARGS__, assign_blob_arena, assign_blob_impl) (__VA_ARGS__)
+#define assign_blob(...) ANYARR_ARG2(__VA_ARGS__, _assign_blob_arena, _assign_blob_impl) (__VA_ARGS__)
 
 
-static inline ANY_NAMESPACE assign_array_arena(DynamicArray *a, ARENA_NAMESPACE *arena) {
+static inline ANY_NAMESPACE _assign_array_arena(DynamicArray *a, ARENA_NAMESPACE *arena) {
     if (a == nullptr) {
         DynamicArray *heap_arr;
         arena_alloc(arena, sizeof(DynamicArray), (void **) &heap_arr);
@@ -568,14 +565,14 @@ static inline ANY_NAMESPACE assign_array_arena(DynamicArray *a, ARENA_NAMESPACE 
 }
 
 
-static inline ANY_NAMESPACE assign_array_impl(DynamicArray *a) {
-    return assign_array_arena(a, ARENA_CTX);
+static inline ANY_NAMESPACE _assign_array_impl(DynamicArray *a) {
+    return _assign_array_arena(a, ARENA_CTX);
 }
 
-#define assign_array(...) ANYARR_ARG2(__VA_ARGS__, assign_array_arena, assign_array_impl) (__VA_ARGS__)
+#define assign_array(...) ANYARR_ARG2(__VA_ARGS__, _assign_array_arena, _assign_array_impl) (__VA_ARGS__)
 
 
-static inline ANY_NAMESPACE assign_map_arena(HashMap *m, ARENA_NAMESPACE *arena) {
+static inline ANY_NAMESPACE _assign_map_arena(HashMap *m, ARENA_NAMESPACE *arena) {
     if (m == nullptr) {
         HashMap *heap_map;
         arena_alloc(arena, sizeof(HashMap), (void **) &heap_map);
@@ -586,11 +583,11 @@ static inline ANY_NAMESPACE assign_map_arena(HashMap *m, ARENA_NAMESPACE *arena)
 }
 
 
-static inline ANY_NAMESPACE assign_map_impl(HashMap *m) {
-    return assign_map_arena(m, ARENA_CTX);
+static inline ANY_NAMESPACE _assign_map_impl(HashMap *m) {
+    return _assign_map_arena(m, ARENA_CTX);
 }
 
-#define assign_map(...) ANYARR_ARG2(__VA_ARGS__, assign_map_arena, assign_map_impl) (__VA_ARGS__)
+#define assign_map(...) ANYARR_ARG2(__VA_ARGS__, _assign_map_arena, _assign_map_impl) (__VA_ARGS__)
 
 
 static inline ANY_NAMESPACE assign_ptr(void *p) {
@@ -601,54 +598,85 @@ static inline ANY_NAMESPACE assign_ptr(void *p) {
 }
 
 
+static inline ANY_NAMESPACE any_disp_bool(const _Bool x, const ARENA_NAMESPACE *arena) {
+    (void) arena;
+    return assign_bool(x);
+}
+
+static inline ANY_NAMESPACE any_disp_char(const char x, const ARENA_NAMESPACE *arena) {
+    (void) arena;
+    return assign_char(x);
+}
+
+static inline ANY_NAMESPACE any_disp_i64(const int64_t x, const ARENA_NAMESPACE *arena) {
+    (void) arena;
+    return assign_int(x);
+}
+
+static inline ANY_NAMESPACE any_disp_u64(const uint64_t x, const ARENA_NAMESPACE *arena) {
+    (void) arena;
+    return assign_uint(x);
+}
+
+static inline ANY_NAMESPACE any_disp_f32(const float x, const ARENA_NAMESPACE *arena) {
+    (void) arena;
+    return assign_float(x);
+}
+
+static inline ANY_NAMESPACE any_disp_f64(const double x, const ARENA_NAMESPACE *arena) {
+    (void) arena;
+    return assign_double(x);
+}
+
+static inline ANY_NAMESPACE any_disp_str(const char *x, ARENA_NAMESPACE *arena) {
+    return _assign_string_arena(x, arena);
+}
+
+static inline ANY_NAMESPACE any_disp_blob(const Blob *x, ARENA_NAMESPACE *arena) {
+    return _assign_blob_arena(x, arena);
+}
+
+static inline ANY_NAMESPACE any_disp_arr(DynamicArray *x, ARENA_NAMESPACE *arena) {
+    return _assign_array_arena(x, arena);
+}
+
+static inline ANY_NAMESPACE any_disp_map(HashMap *x, ARENA_NAMESPACE *arena) {
+    return _assign_map_arena(x, arena);
+}
+
+static inline ANY_NAMESPACE any_disp_ptr(void *x, const ARENA_NAMESPACE *arena) {
+    (void) arena;
+    return assign_ptr(x);
+}
+
+
 // Since we covered every single datatype, natural fallback to void* would allow us to store void* conveniently
-#define assign_any_impl(x) _Generic((x),                          \
-    _Bool: assign_bool((_Bool)x),                                 \
-    char: assign_char((char)x),                                   \
-    signed char: assign_int((int64_t)(x)),                        \
-    short: assign_int((int64_t)(x)),                              \
-    int: assign_int((int64_t)(x)),                                \
-    long: assign_int((int64_t)(x)),                               \
-    long long: assign_int((int64_t)(x)),                          \
-    unsigned char: assign_uint((uint64_t)(x)),                    \
-    unsigned short: assign_uint((uint64_t)(x)),                   \
-    unsigned int: assign_uint((uint64_t)(x)),                     \
-    unsigned long: assign_uint((uint64_t)(x)),                    \
-    unsigned long long: assign_uint((uint64_t)(x)),               \
-    float: assign_float((float)x),                                \
-    double: assign_double((double)x),                             \
-    char*: assign_string_impl((char*)x),                          \
-    const char*: assign_string_impl((const char*)x),              \
-    Blob*: assign_blob_impl((Blob*)x),                            \
-    DynamicArray*: assign_array_impl((DynamicArray*)x),           \
-    HashMap*: assign_map_impl((HashMap*)x),                       \
-    default: assign_ptr((void*)x)                                 \
-)
+#define _assign_any_dispatch(x, arena) _Generic((x),     \
+_Bool: any_disp_bool,                                   \
+char: any_disp_char,                                    \
+signed char: any_disp_i64,                              \
+short: any_disp_i64,                                    \
+int: any_disp_i64,                                      \
+long: any_disp_i64,                                     \
+long long: any_disp_i64,                                \
+unsigned char: any_disp_u64,                            \
+unsigned short: any_disp_u64,                           \
+unsigned int: any_disp_u64,                             \
+unsigned long: any_disp_u64,                            \
+unsigned long long: any_disp_u64,                       \
+float: any_disp_f32,                                    \
+double: any_disp_f64,                                   \
+char*: any_disp_str,                                    \
+const char*: any_disp_str,                              \
+Blob*: any_disp_blob,                                   \
+DynamicArray*: any_disp_arr,                            \
+HashMap*: any_disp_map,                                 \
+default: any_disp_ptr                                   \
+)((x), (arena))
 
-#define assign_any_arena(x, arena) _Generic((x),                  \
-    _Bool: assign_bool((_Bool)x),                                 \
-    char: assign_char((char)x),                                   \
-    signed char: assign_int((int64_t)(x)),                        \
-    short: assign_int((int64_t)(x)),                              \
-    int: assign_int((int64_t)(x)),                                \
-    long: assign_int((int64_t)(x)),                               \
-    long long: assign_int((int64_t)(x)),                          \
-    unsigned char: assign_uint((uint64_t)(x)),                    \
-    unsigned short: assign_uint((uint64_t)(x)),                   \
-    unsigned int: assign_uint((uint64_t)(x)),                     \
-    unsigned long: assign_uint((uint64_t)(x)),                    \
-    unsigned long long: assign_uint((uint64_t)(x)),               \
-    float: assign_float((float)x),                                \
-    double: assign_double((double)x),                             \
-    char*: assign_string_arena((char*)x, arena),                  \
-    const char*: assign_string_arena((const char*)x, arena),      \
-    Blob*: assign_blob_arena((Blob*)x, arena),                    \
-    DynamicArray*: assign_array_arena((DynamicArray*)x, arena),   \
-    HashMap*: assign_map_arena((HashMap*)x, arena),               \
-    default: assign_ptr((void*)x)                                 \
-)
-
-#define assign_any(...) ANYARR_ARG2(__VA_ARGS__, assign_any_arena, assign_any_impl)(__VA_ARGS__)
+#define _assign_any_impl(x) _assign_any_dispatch((x), ARENA_CTX)
+#define _assign_any_arena(x, arena) _assign_any_dispatch((x), (arena))
+#define assign_any(...) ANYARR_ARG2(__VA_ARGS__, _assign_any_arena, _assign_any_impl) (__VA_ARGS__)
 
 
 static inline anyarr_result any_get_bool(const ANY_NAMESPACE *val, _Bool *out_value) {
@@ -785,7 +813,7 @@ static inline anyarr_result any_get_map(const ANY_NAMESPACE *val, HashMap **out_
 static inline AnyIter any_iter(const ANY_NAMESPACE *root);
 static inline ANY_NAMESPACE *any_iter_next(AnyIter *it);
 
-static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) {
+static inline anyarr_result _any_print_impl(ANY_NAMESPACE *val, const int depth) {
 #define INDENT() for (int _i = 0; _i < depth; _i++) printf("  ")
 
     switch (val->type) {
@@ -877,7 +905,7 @@ static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) 
             AnyIter it = any_iter(val);
             ANY_NAMESPACE *item;
             while ((item = any_iter_next(&it))) {
-                any_print_impl(item, depth + 1);
+                _any_print_impl(item, depth + 1);
             }
             INDENT();
             printf("]\n");
@@ -894,7 +922,7 @@ static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) 
                     printf("  ");
                 }
                 printf("%s:\n", it.last_key);
-                any_print_impl(item, depth + 2);
+                _any_print_impl(item, depth + 2);
             }
             INDENT();
             printf("}\n");
@@ -907,13 +935,13 @@ static inline anyarr_result any_print_impl(ANY_NAMESPACE *val, const int depth) 
     }
 }
 
-static inline anyarr_result any_print_helper(ANY_NAMESPACE val) {
-    return any_print_impl(&val, 0);
+static inline anyarr_result _any_print_helper(ANY_NAMESPACE val) {
+    return _any_print_impl(&val, 0);
 }
 
 #define any_print(x) _Generic((x),              \
-    ANY_NAMESPACE*: any_print_impl((x), 0),     \
-    default: any_print_helper(assign_any(x))    \
+    ANY_NAMESPACE*: _any_print_impl((x), 0),     \
+    default: _any_print_helper(assign_any(x))    \
 )
 
 
@@ -1024,7 +1052,7 @@ static inline void resize_memset(uint8_t *out, const size_t count) {
 }
 
 
-static inline anyarr_result map_resize_arena(HashMap *m, ARENA_NAMESPACE *arena) {
+static inline anyarr_result _map_resize_arena(HashMap *m, ARENA_NAMESPACE *arena) {
     const uint8_t *old_fingerprint = m->fingerprint;
     char **old_key = m->key;
     const ANY_NAMESPACE *old_value = m->value;
@@ -1132,14 +1160,14 @@ static inline anyarr_result map_resize_arena(HashMap *m, ARENA_NAMESPACE *arena)
 }
 
 
-static inline anyarr_result map_resize_impl(HashMap *m) {
-    return map_resize_arena(m, ARENA_CTX);
+static inline anyarr_result _map_resize_impl(HashMap *m) {
+    return _map_resize_arena(m, ARENA_CTX);
 }
 
-#define map_resize(...) ANYARR_ARG2(__VA_ARGS__, map_resize_arena, map_resize_impl) (__VA_ARGS__)
+#define map_resize(...) ANYARR_ARG2(__VA_ARGS__, _map_resize_arena, _map_resize_impl) (__VA_ARGS__)
 
 
-static inline anyarr_result map_get_impl(const HashMap *m, const char *key, ANY_NAMESPACE **out_value, const _Bool is_internal) {
+static inline anyarr_result _map_get_impl(const HashMap *m, const char *key, ANY_NAMESPACE **out_value, const _Bool is_internal) {
     if (m == nullptr || m->key == nullptr || key == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -1243,17 +1271,17 @@ static inline anyarr_result map_get_impl(const HashMap *m, const char *key, ANY_
 
 
 // Internal and only returns value instead of printing to stderr
-static inline anyarr_result map_get_silent(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
-    return map_get_impl(m, key, out_value, true);
+static inline anyarr_result _map_get_silent(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
+    return _map_get_impl(m, key, out_value, true);
 }
 
 
 static inline anyarr_result map_get(const HashMap *m, const char *key, ANY_NAMESPACE **out_value) {
-    return map_get_impl(m, key, out_value, false);
+    return _map_get_impl(m, key, out_value, false);
 }
 
 
-static inline void map_put_arena(HashMap *m, const char *key, const ANY_NAMESPACE value, ARENA_NAMESPACE *arena) {
+static inline void _map_put_arena(HashMap *m, const char *key, const ANY_NAMESPACE value, ARENA_NAMESPACE *arena) {
     if (m == nullptr || m->key == nullptr || key == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -1419,14 +1447,14 @@ static inline void map_put_arena(HashMap *m, const char *key, const ANY_NAMESPAC
 }
 
 
-static inline void map_put_impl(HashMap *m, const char *key, const ANY_NAMESPACE value) {
-    map_put_arena(m, key, value, ARENA_CTX);
+static inline void _map_put_impl(HashMap *m, const char *key, const ANY_NAMESPACE value) {
+    _map_put_arena(m, key, value, ARENA_CTX);
 }
 
-#define map_put_impl_any(m, key, value) map_put_impl(m, key, assign_any(value))
-#define map_put_arena_any(m, key, value, arena) map_put_arena(m , key, assign_any(value, arena), arena)
+#define _map_put_impl_any(m, key, value) _map_put_impl(m, key, assign_any(value))
+#define _map_put_arena_any(m, key, value, arena) _map_put_arena(m , key, assign_any(value, arena), arena)
 
-#define map_put(...) ANYARR_ARG4(__VA_ARGS__, map_put_arena_any, map_put_impl_any) (__VA_ARGS__)
+#define map_put(...) ANYARR_ARG4(__VA_ARGS__, _map_put_arena_any, _map_put_impl_any) (__VA_ARGS__)
 
 
 static inline anyarr_result map_remove(HashMap *m, const char *key) {
@@ -1571,7 +1599,7 @@ static inline void array_copy(ANY_NAMESPACE *out, ANY_NAMESPACE *in, const size_
 }
 
 
-static inline anyarr_result array_append_arena(DynamicArray *buf, const ANY_NAMESPACE value, ARENA_NAMESPACE *arena) {
+static inline anyarr_result _array_append_arena(DynamicArray *buf, const ANY_NAMESPACE value, ARENA_NAMESPACE *arena) {
     if (buf == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -1609,14 +1637,14 @@ static inline anyarr_result array_append_arena(DynamicArray *buf, const ANY_NAME
 }
 
 
-static inline anyarr_result array_append_impl(DynamicArray *buf, const ANY_NAMESPACE value) {
-    return array_append_arena(buf, value, ARENA_CTX);
+static inline anyarr_result _array_append_impl(DynamicArray *buf, const ANY_NAMESPACE value) {
+    return _array_append_arena(buf, value, ARENA_CTX);
 }
 
-#define array_append_impl_any(buf, value) array_append_impl(buf, assign_any(value))
-#define array_append_arena_any(buf, value, arena) array_append_arena(buf, assign_any(value), arena)
+#define _array_append_impl_any(buf, value) _array_append_impl(buf, assign_any(value))
+#define _array_append_arena_any(buf, value, arena) _array_append_arena(buf, assign_any(value, arena), arena)
 
-#define array_append(...) ANYARR_ARG3(__VA_ARGS__, array_append_arena_any, array_append_impl_any) (__VA_ARGS__)
+#define array_append(...) ANYARR_ARG3(__VA_ARGS__, _array_append_arena_any, _array_append_impl_any) (__VA_ARGS__)
 
 
 static inline anyarr_result array_remove_index(DynamicArray *buf, const size_t index) {
@@ -1635,7 +1663,7 @@ static inline anyarr_result array_remove_index(DynamicArray *buf, const size_t i
 }
 
 
-static inline anyarr_result array_set_index_impl(const DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
+static inline anyarr_result _array_set_index_impl(const DynamicArray *buf, const size_t index, const ANY_NAMESPACE value) {
     if (buf == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -1645,7 +1673,7 @@ static inline anyarr_result array_set_index_impl(const DynamicArray *buf, const 
     buf->data[index] = value;
     return ANYARR_OK;
 }
-#define array_set_index(buf, index, value) array_set_index_impl(buf, index, assign_any(value))
+#define array_set_index(buf, index, value) _array_set_index_impl(buf, index, assign_any(value))
 
 
 static inline anyarr_result array_get(const DynamicArray *buf, const size_t index, ANY_NAMESPACE **out_value) {
@@ -1684,7 +1712,7 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
         }
         segment[i] = '\0';
         if (current->type == TYPE_MAP) {
-            const anyarr_result r = map_get_silent(current->data.m, segment, &current);
+            const anyarr_result r = _map_get_silent(current->data.m, segment, &current);
             if (r != ANYARR_OK) {
                 return handle_error(r, __LINE__, __FILE__);
             }
@@ -1707,7 +1735,7 @@ static inline anyarr_result any_get_path(ANY_NAMESPACE *root, const char *path, 
 }
 
 
-static inline void array_reserve_arena(DynamicArray *buf, const size_t new_capacity, ARENA_NAMESPACE *arena) {
+static inline void _array_reserve_arena(DynamicArray *buf, const size_t new_capacity, ARENA_NAMESPACE *arena) {
     if (buf == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -1724,14 +1752,14 @@ static inline void array_reserve_arena(DynamicArray *buf, const size_t new_capac
 }
 
 
-static inline void array_reserve_impl(DynamicArray *buf, const size_t new_capacity) {
-    array_reserve_arena(buf, new_capacity, ARENA_CTX);
+static inline void _array_reserve_impl(DynamicArray *buf, const size_t new_capacity) {
+    _array_reserve_arena(buf, new_capacity, ARENA_CTX);
 }
 
-#define array_reserve(...) ANYARR_ARG3(__VA_ARGS__, array_reserve_arena, array_reserve_impl) (__VA_ARGS__)
+#define array_reserve(...) ANYARR_ARG3(__VA_ARGS__, _array_reserve_arena, _array_reserve_impl) (__VA_ARGS__)
 
 
-static inline anyarr_result any_clone_arena(const ANY_NAMESPACE *src, ANY_NAMESPACE *dest, ARENA_NAMESPACE *arena) {
+static inline anyarr_result _any_clone_arena(const ANY_NAMESPACE *src, ANY_NAMESPACE *dest, ARENA_NAMESPACE *arena) {
     if (src == nullptr || dest == nullptr) {
         handle_error(ANYARR_ERR_NULLPTR, __LINE__, __FILE__);
     }
@@ -1757,11 +1785,11 @@ static inline anyarr_result any_clone_arena(const ANY_NAMESPACE *src, ANY_NAMESP
             array_init(new_arr, arena);
             for (size_t i = 0; i < src_arr->size; i++) {
                 ANY_NAMESPACE cloned_elem;
-                const anyarr_result res = any_clone_arena(&src_arr->data[i], &cloned_elem, arena);
+                const anyarr_result res = _any_clone_arena(&src_arr->data[i], &cloned_elem, arena);
                 if (res != ANYARR_OK) {
                     return res;
                 }
-                array_append_arena(new_arr, cloned_elem, arena);
+                _array_append_arena(new_arr, cloned_elem, arena);
             }
             *dest = assign_array(new_arr);
             return ANYARR_OK;
@@ -1786,11 +1814,11 @@ static inline anyarr_result any_clone_arena(const ANY_NAMESPACE *src, ANY_NAMESP
                     continue;
                 }
                 ANY_NAMESPACE cloned_val;
-                const anyarr_result res = any_clone_arena(&src_map->value[i], &cloned_val, arena);
+                const anyarr_result res = _any_clone_arena(&src_map->value[i], &cloned_val, arena);
                 if (res != ANYARR_OK) {
                     return res;
                 }
-                map_put_arena(new_map, src_map->key[i], cloned_val, arena);
+                _map_put_arena(new_map, src_map->key[i], cloned_val, arena);
             }
             *dest = assign_map(new_map, arena);
             return ANYARR_OK;
@@ -1802,11 +1830,11 @@ static inline anyarr_result any_clone_arena(const ANY_NAMESPACE *src, ANY_NAMESP
 }
 
 
-static inline anyarr_result any_clone_impl(const ANY_NAMESPACE *src, ANY_NAMESPACE *dest) {
-    return any_clone_arena(src, dest, ARENA_CTX);
+static inline anyarr_result _any_clone_impl(const ANY_NAMESPACE *src, ANY_NAMESPACE *dest) {
+    return _any_clone_arena(src, dest, ARENA_CTX);
 }
 
-#define any_clone(...) ANYARR_ARG3(__VA_ARGS__, any_clone_arena, any_clone_impl) (__VA_ARGS__)
+#define any_clone(...) ANYARR_ARG3(__VA_ARGS__, _any_clone_arena, _any_clone_impl) (__VA_ARGS__)
 
 
 static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPACE *b) {
@@ -1906,7 +1934,7 @@ static inline anyarr_result any_equal(const ANY_NAMESPACE *a, const ANY_NAMESPAC
                     continue;
                 }
                 ANY_NAMESPACE *val_b;
-                if (map_get_silent(mb, ma->key[i], &val_b) != ANYARR_OK) {
+                if (_map_get_silent(mb, ma->key[i], &val_b) != ANYARR_OK) {
                     return ANYARR_NOT_EQUAL;
                 }
                 const anyarr_result res = any_equal(&ma->value[i], val_b);
@@ -1986,7 +2014,7 @@ static inline ANY_NAMESPACE *any_iter_next(AnyIter *it) {
 
     if (it->type == TYPE_MAP) {
         while (it->index < it->bound) {
-            uint8_t ctrl = it->fingerprint[it->index];
+            const uint8_t ctrl = it->fingerprint[it->index];
             if (ctrl >= 0x80) {
                 it->index++;
                 continue;
@@ -2082,19 +2110,6 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
 }
 
 
-#define assign_num(x) _Generic((x), \
-    int64_t*: assign_num_i64,       \
-    uint64_t*: assign_num_u64,      \
-    int32_t*: assign_num_i32,       \
-    uint32_t*: assign_num_u32,      \
-    int16_t*: assign_num_i16,       \
-    uint16_t*: assign_num_u16,      \
-    int8_t*: assign_num_i8,         \
-    uint8_t*: assign_num_u8,        \
-    double*: assign_num_f64,        \
-    float*: assign_num_f32,         \
-)(x)
-
 #define get_any(val_ptr, out_ptr) _Generic((out_ptr),   \
     _Bool*: any_get_bool,                               \
     char*: any_get_char,                                \
@@ -2104,8 +2119,6 @@ static inline ANY_NAMESPACE *any_walk_next(AnyWalker *walk) {
     double*: any_get_double,                            \
     const char**: any_get_string,                       \
     Blob*: any_get_blob,                                \
-    DynamicArray**: any_get_array,                      \
-    HashMap**: any_get_map,                             \
     void**: any_get_ptr                                 \
 )(val_ptr, out_ptr)
 
@@ -2134,13 +2147,16 @@ _v;                                                                        \
 for (AnyIter _it_##ctr = _any_iter_generic(root_ptr);   \
 (item = any_iter_next(&_it_##ctr)) != nullptr; )
 
-#define foreach(item, root_ptr) _foreach_impl(item, root_ptr, __COUNTER__)
+#define _foreach_uniq(item, root_ptr, ctr) _foreach_impl(item, root_ptr, ctr)
+#define foreach(item, root_ptr) _foreach_uniq(item, root_ptr, __COUNTER__)
 
 
 #define _foreach_kv_impl(key, item, root_ptr, ctr)                      \
 for (AnyIter _it_##ctr = _any_iter_generic(root_ptr);                   \
 (item = any_iter_next(&_it_##ctr)) && (key = _it_##ctr.last_key, 1); )
 
-#define foreach_kv(key, item, root_ptr) _foreach_kv_impl(key, item, root_ptr, __COUNTER__)
+#define _foreach_kv_uniq(key, item, root_ptr, ctr) _foreach_kv_impl(key, item, root_ptr, ctr)
+#define foreach_kv(key, item, root_ptr) _foreach_kv_uniq(key, item, root_ptr, __COUNTER__)
 
+#pragma GCC diagnostic pop
 #endif

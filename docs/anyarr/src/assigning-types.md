@@ -51,7 +51,8 @@ assign_any(&blob, &custom_arena_electric_boogaloo);
 **DynamicArray:** Wraps a DynamicArray into an Any value. The array can still be used directly through its pointer for appending and indexing.
 
 ```c
-DynamicArray(Array);
+DynamicArray Array;
+array_init(&Array);
 array_append(&Array, 20); // Stores an integer
 array_append(&Array, "String"); // Stores a small string
 ```
@@ -59,7 +60,8 @@ array_append(&Array, "String"); // Stores a small string
 **Hashmaps:** Wraps a HashMap into an Any value. The map can still be used directly through its pointer for insertion and lookup.
 
 ```c
-HashMap(Map);
+HashMap Map;
+map_init(&Map);
 map_put(&Map, "Key", "Value");
 map_put(&Map, "Key1", 20);
 ```

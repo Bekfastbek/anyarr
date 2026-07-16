@@ -9,12 +9,4 @@
 
 ## Before You Start
 
-The library only works on C11 and later with only GCC and Clang due to specific compiler optimizations. The library is still under active development so things may change regularly.
-
-By default the namespace of heterogeneous values is `Any` which can likely cause namespace issues so there's a macro to fix namespace conflicts.
-
-```c
-#define ANYARR_IMPLEMENTATION
-#define ANY_NAMESPACE AnyArr
-#include "anyarr.h"
-```
+The library only works on C11 and later with only GCC and Clang due to specific compiler optimizations. It also provides `nullptr` which falls back to `(void*) 0` as macro if not in C23.
