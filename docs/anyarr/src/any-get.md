@@ -12,9 +12,11 @@ get_any(val, &out); // *out will have the returning datatype since you cannot de
 **path_get():** Returns the datatype based on path traversal.
 
 ```c
-HashMap(Map);
+HashMap Map;
+map_init(&Map);
 map_put(&Map, "Active", true);
-DynamicArray(Array);
+DynamicArray Array;
+array_init(&Array);
 array_append(&Array, "bek");
 array_append(&Array, &Map);
 bool out;

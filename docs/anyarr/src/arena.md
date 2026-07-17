@@ -27,7 +27,7 @@ arena_reset(anyarr_arena); // Only accepts the pointer to the arena
 
 ```c
 size_t cp = arena_save(anyarr_arena);
-size_t cp = arena_save(NULL); // Defaults to global arena
+size_t cp = arena_save(nullptr); // Defaults to global arena
 ```
 
 **arena_restore():** Rewinds the arena back to a previously saved checkpoint and zeroes the reclaimed region. Everything allocated after the save point is invalidated. Accepts `NULL` and defaults to the global arena. If the checkpoint is already past the current position, it does nothing.
@@ -36,7 +36,7 @@ size_t cp = arena_save(NULL); // Defaults to global arena
 
 ```c
 arena_restore(anyarr_arena, cp);
-arena_restore(NULL, cp);
+arena_restore(nullptr, cp);
 ```
 
 **ARENA_TEMP:** Macro which just does the same thing as saving and restoring the arena and only works with the global arena. So instead of
@@ -47,14 +47,14 @@ int main() {
     ...
     ...
     ...
-    size_t cp = arena_save(NULL);
+    size_t cp = arena_save(nullptr);
     ...
     ...
     ...       // Your code
     ...
     ...
     ...
-    arena_restore(NULL, cp); // Restore here
+    arena_restore(nullptr, cp); // Restore here
 }
 ```
 

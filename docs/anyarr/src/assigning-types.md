@@ -63,5 +63,5 @@ array_append(&Array, "String"); // Stores a small string
 HashMap Map;
 map_init(&Map);
 map_put(&Map, "Key", "Value");
-map_put(&Map, "Key1", 20);
+map_put(&Map, 1, 20);
 ```

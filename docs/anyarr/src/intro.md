@@ -1,6 +1,6 @@
 # AnyArr
 
-**AnyArr** is a single-header C library providing a dynamic array, a hash map, and a tagged-union `Any` value type, backed by a virtual-memory arena allocator. It is designed to be as fast as possible while remaining easy and flexible to use.
+**AnyArr** is a single-header GCC/Clang 11 library providing a dynamic array, a hash map, and a tagged-union `Any` value type, backed by a virtual-memory arena allocator. It is designed to be as fast as possible while remaining easy and flexible to use.
 
 ```c
 #define ANYARR_IMPLEMENTATION
